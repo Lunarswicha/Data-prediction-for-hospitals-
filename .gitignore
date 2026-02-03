@@ -1,0 +1,42 @@
+# Environnement
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Données (ne pas versionner les gros fichiers)
+data/raw/*.csv
+data/raw/*.xlsx
+data/raw/*.parquet
+data/generated/*.csv
+data/generated/*.parquet
+data/processed/*.csv
+data/processed/*.parquet
+*.pdf
+!docs/**/*.pdf
+
+# Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Modèles sauvegardés (optionnel)
+*.pkl
+*.joblib
+*.h5
+*.pt
+models/
+
+# Logs
+*.log
+logs/
