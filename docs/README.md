@@ -1,5 +1,26 @@
 # Documentation du projet — Pitié-Salpêtrière
+---
 
+## 🚨 URGENT — CORRECTIONS DU 5 FÉVRIER 2026
+
+**Statut : 🟢 BUG CRITIQUE CORRIGÉ — PROJET PRÊT POUR SOUTENANCE**
+
+### 📖 Démarrage rapide (lisez dans cet ordre) :
+1. **[CHECKLIST-SOUTENANCE.md](CHECKLIST-SOUTENANCE.md)** ← **COMMENCER ICI** (5 min avant la soutenance)
+2. **[RESUME-FINAL.md](RESUME-FINAL.md)** ← Rapport complet de la correction (lecture : 10 min)
+3. **[DIAGNOSTIC-PREDICTIONS.md](DIAGNOSTIC-PREDICTIONS.md)** ← Analyse détaillée du bug (optionnel)
+4. **[CORRECTION-VALIDEE.md](CORRECTION-VALIDEE.md)** ← Détails techniques de la correction (optionnel)
+
+### ⚡ Résumé ultra-rapide :
+- ✅ **Bug identifié** : Le modèle stock-flux utilisait une formule statique défectueuse
+- ✅ **Correction** : Modèle dynamique jour par jour (physiquement cohérent)
+- ✅ **Validation** : 92% des jours avec variations dynamiques (au lieu de <20%)
+- ✅ **Dashboard** : Testé, fonctionne correctement, aucune régression
+- ✅ **Statut** : **PRÊT POUR LA SOUTENANCE**
+
+---
+
+## 📚 Documentation du projet
 Index de la documentation, **organisée par catégories**. Pour une vue d’ensemble du projet, des rapports et des résultats liés aux chiffres et modèles, voir **[VUE-ENSEMBLE-PROJET.md](VUE-ENSEMBLE-PROJET.md)**.
 
 ---

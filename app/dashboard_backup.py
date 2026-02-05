@@ -477,18 +477,19 @@ if section == "Flux & historique":
 
 # --- Prévisions ---
 elif section == "Prévisions":
-    st.header("Prévisions d'occupation des lits")
-    st.caption("Prévisions par ensemble automatique de modèles. Intervalles de confiance à 95%.")
+    st.header("Prévisions des besoins")
+    st.caption("Modèles : Holt-Winters (saisonnalité 7j), régression Ridge avec **splines** (jour_semaine, jour_du_mois, température — approximation GAM, réf. Bouteloup), lags 1–7–14 + calendrier, durée de séjour saisonnière (Lequertier) ; IC 95 %. Veille thèses : docs/04-litterature/VEILLE-THESES-DOCTORATS.md")
     # ----- 1. Période -----
     last_date = occupation_df["date"].max()
     start_prevision = last_date + pd.Timedelta(days=1)
     start_prevision_date = start_prevision.date() if hasattr(start_prevision, "date") else pd.Timestamp(start_prevision).date()
     HORIZON_MAX_JOURS = 180
+    st.subheader("1. Sur quelle période ?")
     preset_horizons = {"14 jours": 14, "1 mois": 30, "3 mois": 90, "6 mois": 180}
     preset_choisi = st.radio(
-        "Période",
+        "Portée",
         options=list(preset_horizons.keys()),
-        index=1,
+        index=0,
         key="pred_preset",
         horizontal=True,
         label_visibility="collapsed",
@@ -501,64 +502,119 @@ elif section == "Prévisions":
     _end_str = end_prevision_date.strftime("%d/%m/%Y") if (hasattr(end_prevision_date, "strftime") and pd.notna(end_prevision_date)) else str(end_prevision_date)
     st.markdown(f"**Du {_start_str} au {_end_str}** — **{horizon} jours**")
 
+    # ----- 2. Modèle -----
+    st.subheader("2. Quel modèle ?")
+    with st.expander("Aide — Données, modèles, % affichés, vagues"):
+        st.markdown(
+            "**Données** : le jeu est **synthétique** (généré par `src.data.generate`), avec des tendances réalistes mais lisses. "
+            "Il n’y a pas de données réelles de patients.\n\n"
+            "**Modèles** : chaque option force un algorithme précis. **Via admissions** = on prévoit d’abord les entrées quotidiennes, "
+            "puis on en déduit l’occupation des lits (formule de stock). **Occupation directe** = on prévoit directement le nombre de lits occupés. "
+            "Sur des données synthétiques lisses, **Holt-Winters** et **Ridge** peuvent donner des courbes proches ; "
+            "la **moyenne glissante** est en général plus plate (moins de vagues).\n\n"
+            "**Taux d’occupation** (ex. 67 %, 82 %) = lits occupés prévus / 1800. "
+            "**% à ±10 %** (Bouteloup) = proportion de jours où l’erreur relative est ≤ 10 %. "
+            "**85 % et 95 %** = seuils d’alerte et critique (constantes). Détail : **docs/03-modeles-et-resultats/EXPLICATION-POURCENTAGES.md**\n\n"
+            "**D’où viennent les « vagues » ?** La prévision repose sur la **saisonnalité hebdomadaire** (jour de la semaine) : "
+            "le même jour se répète toutes les 7 jours, donc les pics enchaînent (ex. 5, 12, 19, 26 du mois) — ce n’est pas un pic « mi-mois » au sens métier. "
+            "Un effet **fin de mois** est pris en compte via les variables *jour du mois* et *fin de mois* dans la régression."
+        )
 
+    MODELES_PREVISION = [
+        ("Auto (meilleur disponible)", "auto"),
+        ("Holt-Winters (admissions puis occupation)", "holt_winters"),
+        ("Régression Ridge (admissions puis occupation)", "ridge"),
+        ("SARIMA (admissions puis occupation)", "sarima"),
+        ("Moyenne glissante (admissions puis occupation)", "ma"),
+        ("Boosting XGBoost/GBM (admissions puis occupation)", "boosting"),
+        ("Occupation directe (Holt-Winters sur les lits)", "direct_hw"),
+        ("Occupation directe (Régression sur les lits)", "direct_ridge"),
+    ]
+    modele_choisi_label = st.selectbox(
+        "Modèle de prédiction",
+        options=[m[0] for m in MODELES_PREVISION],
+        index=0,
+        key="choix_modele_prevision",
+        help="Permet de visualiser les prévisions par modèle pour la démo et de comparer les sorties.",
+    )
+    modele_choisi = next(m[1] for m in MODELES_PREVISION if m[0] == modele_choisi_label)
     CAPACITE = 1800
 
-    # Calcul automatique par ensemble pondéré
-    with st.spinner("Calcul en cours..."):
-        adm_series = prepare_series(occupation_df, "admissions_jour")
-        
-        # Prédiction par ensemble (on garde la variation des modèles : mois, saison, etc.)
-        pred_adm_ensemble = predict_admissions_ensemble(adm_series, horizon_jours=horizon)
-
-        # Déduire l'occupation (saisonnalité hiver/été appliquée dans le modèle stock)
-        pred_df = predict_occupation_from_admissions(
-            occupation_df,
-            horizon_jours=horizon,
-            use_best_admissions=False,
-            duree_sejour_saisonniere=True,
-            pred_adm=pred_adm_ensemble,
-            capacite_lits=CAPACITE,
-        )
-        
+    # Calcul des prévisions selon le modèle choisi (logique explicite pour que la courbe change bien)
+    best_model_name = None
+    best_model_metrics = None
+    if modele_choisi == "auto":
+        besoins = predict_besoins(occupation_df, horizon_jours=horizon, capacite_lits=CAPACITE)
+        # Afficher quel modèle a été sélectionné par le benchmark (meilleur % ±10 %, puis MAE)
+        adm_series_auto = prepare_series(occupation_df, "admissions_jour")
+        val_days = min(90, max(28, len(adm_series_auto) // 3))
+        best_model_name, best_model_metrics = select_best_model_by_backtest(adm_series_auto, validation_days=val_days)
+    elif modele_choisi == "direct_hw":
+        pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon, prefer="holt_winters")
+        if not pred_df.empty:
+            pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / CAPACITE
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / CAPACITE
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / CAPACITE
         besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
-        
-        # Informations sur l'ensemble
-        ensemble_info = get_ensemble_info(adm_series)
+    elif modele_choisi == "direct_ridge":
+        pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon, prefer="regression")
+        if not pred_df.empty:
+            pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / CAPACITE
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / CAPACITE
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / CAPACITE
+        besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
+    else:
+        # Via admissions : on prédit les admissions avec le modèle choisi, puis on déduit l'occupation
+        adm_series = prepare_series(occupation_df, "admissions_jour")
+        pred_adm = None
+        if modele_choisi == "holt_winters":
+            pred_adm = predict_holt_winters(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "ridge":
+            pred_adm = predict_regression(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "sarima":
+            pred_adm = predict_sarima(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "ma":
+            pred_adm = predict_moving_average(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "boosting":
+            pred_adm = predict_boosting(adm_series, horizon_jours=horizon)
+        if pred_adm is not None and not pred_adm.empty and len(pred_adm) >= horizon:
+            pred_df = predict_occupation_from_admissions(
+                occupation_df,
+                horizon_jours=horizon,
+                duree_sejour_moy=6.0,
+                use_best_admissions=False,
+                duree_sejour_saisonniere=True,
+                pred_adm=pred_adm,
+            )
+            besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
+        else:
+            besoins = predict_besoins(occupation_df, horizon_jours=horizon, capacite_lits=CAPACITE)
+            st.caption("Modèle demandé non disponible (série trop courte ou erreur) ; affichage Auto.")
 
     pred_df = besoins["previsions"]
 
-    # ----- Résultats -----
-    st.subheader("Résultats")
-    
-    # Afficher les modèles utilisés (collapsible)
-    with st.expander("ℹ️ Méthodologie d'ensemble"):
-        st.markdown(
-            f"**Validation** : Backtest sur les {ensemble_info['validation_days']} derniers jours.\n\n"
-            f"**Top 3 des modèles retenus** (pondération par performance sur ±10%) :"
-        )
-        for nom in ensemble_info['top3_names']:
-            poids = ensemble_info['weights'].get(nom, 0)
-            perf = ensemble_info['all_performances'].get(nom, {})
-            st.markdown(
-                f"- **{nom}** ({poids:.0f}%) : Précision ±10% = {perf.get('pct_within_10', 0):.1f}% | MAE = {perf.get('mae', 0):.1f}"
-            )
+    # ----- 3. Résultats -----
+    st.subheader("3. Résultats")
+    if modele_choisi == "auto" and best_model_name:
         st.caption(
-            "Les prévisions finales sont la moyenne pondérée des 3 modèles. "
-            "Les intervalles  de confiance reflètent la variabilité entre modèles."
+            f"Modèle affiché : **{modele_choisi_label}** — modèle utilisé pour les admissions : **{best_model_name}** "
+            f"(sélectionné par benchmark : meilleur % à ±10 % sur les {val_days} derniers jours)."
         )
+        if best_model_metrics and best_model_metrics.get(best_model_name):
+            with st.expander("Voir les métriques du benchmark (tous les modèles)"):
+                for name, m in best_model_metrics.items():
+                    st.text(f"{name}: % ±10 % = {m.get('pct_within_10', 0):.1%}, MAE = {m.get('mae', 0):.1f}, RMSE = {m.get('rmse', 0):.1f}")
+    else:
+        st.caption(f"Modèle affiché : **{modele_choisi_label}**.")
 
-    # Graphique principal
+    # Graphique en premier (pleine largeur)
     fig_pred = go.Figure()
-    
-    # Courbe principale
     fig_pred.add_trace(
         go.Scatter(
             x=pred_df["date"],
             y=pred_df["occupation_lits_pred"],
-            mode="lines",
+            mode="lines+markers",
             name="Occupation prévue",
-            line=dict(color="#1f77b4", width=3),
         )
     )
     if "occupation_lits_low" in pred_df.columns and "occupation_lits_high" in pred_df.columns:
@@ -576,9 +632,10 @@ elif section == "Prévisions":
         )
     fig_pred.add_hline(y=1800 * 0.85, line_dash="dash", line_color="orange")
     fig_pred.add_hline(y=1800 * 0.95, line_dash="dash", line_color="red")
-    fig_pred.update_layout(height=350, title="Occupation prévue — Ensemble pondéré")
+    fig_pred.update_layout(height=350, title=f"Occupation prévue — {modele_choisi_label}")
     fig_pred.update_xaxes(tickformat="%d/%m/%Y")
     st.plotly_chart(fig_pred, use_container_width=True)
+    st.caption("Saisonnalité hebdo (jour de la semaine) + effet possible fin de mois. Les pics répétés = même jour de la semaine, pas une logique calendaire « mi-mois ».")
 
     # Indicateurs et recommandation
     col_k1, col_k2 = st.columns(2)
@@ -596,7 +653,10 @@ elif section == "Prévisions":
     st.subheader("Détail des prévisions")
     pred_display = pred_df[[c for c in cols_table if c in pred_df.columns]].head(horizon).copy()
     pred_display["date"] = pd.to_datetime(pred_display["date"]).dt.strftime("%d/%m/%Y")
-    if "admissions_pred" in pred_display.columns:
+    if "admissions_pred" in pred_display.columns and pred_display["admissions_pred"].isna().all():
+        pred_display["admissions_pred"] = "—"
+        st.caption("**Admissions prédites (—)** : en mode *prédiction directe* (occupation des lits sans passer par les admissions), les admissions ne sont pas estimées par le modèle.")
+    elif "admissions_pred" in pred_display.columns:
         pred_display["admissions_pred"] = pred_display["admissions_pred"].apply(
             lambda x: round(x, 1) if pd.notna(x) else "—"
         )

@@ -478,12 +478,13 @@ if section == "Flux & historique":
 # --- Prévisions ---
 elif section == "Prévisions":
     st.header("Prévisions d'occupation des lits")
-    st.caption("Prévisions par ensemble automatique de modèles. Intervalles de confiance à 95%.")
+    st.caption("**Ensemble pondéré** automatique des meilleurs modèles (Holt-Winters, Ridge, SARIMA, XGBoost). Intervalles de confiance à 95%. Validation sur 90 jours.")
     # ----- 1. Période -----
     last_date = occupation_df["date"].max()
     start_prevision = last_date + pd.Timedelta(days=1)
     start_prevision_date = start_prevision.date() if hasattr(start_prevision, "date") else pd.Timestamp(start_prevision).date()
     HORIZON_MAX_JOURS = 180
+    st.subheader("Horizon de prévision")
     preset_horizons = {"14 jours": 14, "1 mois": 30, "3 mois": 90, "6 mois": 180}
     preset_choisi = st.radio(
         "Période",
@@ -501,17 +502,34 @@ elif section == "Prévisions":
     _end_str = end_prevision_date.strftime("%d/%m/%Y") if (hasattr(end_prevision_date, "strftime") and pd.notna(end_prevision_date)) else str(end_prevision_date)
     st.markdown(f"**Du {_start_str} au {_end_str}** — **{horizon} jours**")
 
+    # ----- 2. Modèle -----
+    st.subheader("2. Quel modèle ?")
+    with st.expander("Aide — Données, modèles, % affichés, vagues"):
+        st.markdown(
+            "**Données** : le jeu est **synthétique** (généré par `src.data.generate`), avec des tendances réalistes mais lisses. "
+            "Il n’y a pas de données réelles de patients.\n\n"
+            "**Modèles** : chaque option force un algorithme précis. **Via admissions** = on prévoit d’abord les entrées quotidiennes, "
+            "puis on en déduit l’occupation des lits (formule de stock). **Occupation directe** = on prévoit directement le nombre de lits occupés. "
+            "Sur des données synthétiques lisses, **Holt-Winters** et **Ridge** peuvent donner des courbes proches ; "
+            "la **moyenne glissante** est en général plus plate (moins de vagues).\n\n"
+            "**Taux d’occupation** (ex. 67 %, 82 %) = lits occupés prévus / 1800. "
+            "**% à ±10 %** (Bouteloup) = proportion de jours où l’erreur relative est ≤ 10 %. "
+            "**85 % et 95 %** = seuils d’alerte et critique (constantes). Détail : **docs/03-modeles-et-resultats/EXPLICATION-POURCENTAGES.md**\n\n"
+            "**D’où viennent les « vagues » ?** La prévision repose sur la **saisonnalité hebdomadaire** (jour de la semaine) : "
+            "le même jour se répète toutes les 7 jours, donc les pics enchaînent (ex. 5, 12, 19, 26 du mois) — ce n’est pas un pic « mi-mois » au sens métier. "
+            "Un effet **fin de mois** est pris en compte via les variables *jour du mois* et *fin de mois* dans la régression."
+        )
 
     CAPACITE = 1800
 
     # Calcul automatique par ensemble pondéré
-    with st.spinner("Calcul en cours..."):
+    with st.spinner("Calcul des prévisions (ensemble de modèles)..."):
         adm_series = prepare_series(occupation_df, "admissions_jour")
         
-        # Prédiction par ensemble (on garde la variation des modèles : mois, saison, etc.)
+        # Prédiction par ensemble
         pred_adm_ensemble = predict_admissions_ensemble(adm_series, horizon_jours=horizon)
-
-        # Déduire l'occupation (saisonnalité hiver/été appliquée dans le modèle stock)
+        
+        # Déduire l'occupation
         pred_df = predict_occupation_from_admissions(
             occupation_df,
             horizon_jours=horizon,
@@ -529,7 +547,7 @@ elif section == "Prévisions":
     pred_df = besoins["previsions"]
 
     # ----- Résultats -----
-    st.subheader("Résultats")
+    st.subheader("Résultats de prévision")
     
     # Afficher les modèles utilisés (collapsible)
     with st.expander("ℹ️ Méthodologie d'ensemble"):
@@ -579,6 +597,7 @@ elif section == "Prévisions":
     fig_pred.update_layout(height=350, title="Occupation prévue — Ensemble pondéré")
     fig_pred.update_xaxes(tickformat="%d/%m/%Y")
     st.plotly_chart(fig_pred, use_container_width=True)
+    st.caption("Saisonnalité hebdo (jour de la semaine) + effet possible fin de mois. Les pics répétés = même jour de la semaine, pas une logique calendaire « mi-mois ».")
 
     # Indicateurs et recommandation
     col_k1, col_k2 = st.columns(2)
@@ -596,7 +615,10 @@ elif section == "Prévisions":
     st.subheader("Détail des prévisions")
     pred_display = pred_df[[c for c in cols_table if c in pred_df.columns]].head(horizon).copy()
     pred_display["date"] = pd.to_datetime(pred_display["date"]).dt.strftime("%d/%m/%Y")
-    if "admissions_pred" in pred_display.columns:
+    if "admissions_pred" in pred_display.columns and pred_display["admissions_pred"].isna().all():
+        pred_display["admissions_pred"] = "—"
+        st.caption("**Admissions prédites (—)** : en mode *prédiction directe* (occupation des lits sans passer par les admissions), les admissions ne sont pas estimées par le modèle.")
+    elif "admissions_pred" in pred_display.columns:
         pred_display["admissions_pred"] = pred_display["admissions_pred"].apply(
             lambda x: round(x, 1) if pd.notna(x) else "—"
         )

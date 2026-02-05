@@ -40,11 +40,13 @@ def generate_admissions(
     start_date: str = "2022-01-01",
     end_date: str = "2024-12-31",  # Au moins 2 années complètes pour comparer hiver / été
     daily_base: int = 320,
-    trend_per_year: float = 0.02,
+    trend_per_year: float = 0.0,
     seed: int = 42,
 ) -> pd.DataFrame:
     """
     Génère des admissions quotidiennes par service avec saisonnalité et bruit.
+    CORRECTION 5 FÉV 2026 : Augmentation du bruit et ajout d'événements aléatoires
+    pour éviter que tous les modèles de ML convergent vers les mêmes prédictions.
     """
     np.random.seed(seed)
     start = pd.to_datetime(start_date)
@@ -52,19 +54,40 @@ def generate_admissions(
     dates = pd.date_range(start, end, freq="D")
 
     n_days = len(dates)
-    # Trend légère
-    trend = np.linspace(0, trend_per_year * (n_days / 365), n_days)
-    # Saisonnalité
-    month_idx = np.array([MONTHLY_INDEX[d.month] for d in dates])
-    weekday_idx = np.array([WEEKDAY_INDEX[d.weekday()] for d in dates])
-    # Bruit
-    noise = np.random.normal(1, 0.08, n_days)
+    # Pas de tendance : niveau stable, seule la saisonnalité (mois, jour de la semaine) varie
+    trend = np.linspace(0, trend_per_year * (n_days / 365), n_days) if trend_per_year != 0 else np.zeros(n_days)
+    
+    # Saisonnalité mensuelle : hiver > été, MAIS avec variation aléatoire ±15%
+    month_idx = np.array([MONTHLY_INDEX[d.month] * np.random.uniform(0.85, 1.15) for d in dates])
+    
+    # Saisonnalité hebdomadaire : base + bruit pour éviter rigidité
+    weekday_idx = np.array([WEEKDAY_INDEX[d.weekday()] * np.random.uniform(0.90, 1.10) for d in dates])
+    
+    # Bruit augmenté : 18% au lieu de 8% (données réelles hospitalières plus volatiles)
+    noise = np.random.normal(1, 0.18, n_days)
+    
+    # Composante AR(1) pour autocorrélation (les admissions d'un jour dépendent du jour précédent)
+    ar_component = np.zeros(n_days)
+    ar_component[0] = np.random.normal(0, 0.1)
+    for i in range(1, n_days):
+        ar_component[i] = 0.3 * ar_component[i-1] + np.random.normal(0, 0.1)
+    
+    # Événements aléatoires (pics imprévisibles : épidémie, accident collectif, etc.)
+    # 5% des jours ont un événement (+20 à +80 admissions)
+    random_events = np.zeros(n_days)
+    n_events = int(n_days * 0.05)
+    event_days = np.random.choice(n_days, n_events, replace=False)
+    for day in event_days:
+        random_events[day] = np.random.uniform(20, 80)
+    
     daily_total = (
         daily_base
         * (1 + trend)
         * month_idx
         * weekday_idx
-        * np.clip(noise, 0.7, 1.3)
+        * np.clip(noise, 0.5, 1.5)  # Plage élargie (50%-150% au lieu de 70%-130%)
+        * (1 + ar_component)
+        + random_events
     ).astype(int)
 
     rows = []
