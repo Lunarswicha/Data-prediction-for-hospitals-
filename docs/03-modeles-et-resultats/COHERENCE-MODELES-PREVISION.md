@@ -16,7 +16,7 @@ Ce document vérifie la cohérence des modèles de prédiction (admissions, occu
 | **SARIMA** | ARIMA avec composante saisonnière (7 j) | admissions/jour | conf_int(0,05) ou \( \hat{y} \pm 1{,}96\sqrt{\sigma^2} \) |
 | **Boosting (XGBoost/GBM)** | Même \( x \) que Ridge + splines, modèle gradient boosting | admissions/jour | \( \hat{y} \pm 1{,}96 \, \sigma_{residus} \) |
 
-**Choix effectif (admissions)** : `predict_admissions_best` retourne **un seul** modèle, dans l'ordre : Holt-Winters → Ridge → SARIMA → MA (le premier qui réussit). Il n'y a **pas de mélange** de plusieurs modèles pour une même prévision.
+**Choix effectif (admissions)** : `predict_admissions_best` utilise par défaut **Holt-Winters Triple Exponential Smoothing** (statsmodels) : `trend='add'`, `seasonal='add'`, `seasonal_periods=7`, IC à partir des résidus (30 derniers jours). Autres options : `best_by_backtest` (benchmark HW / Ridge / Boosting / SARIMA), ou cascade HW → Ridge → Boosting → SARIMA → MA.
 
 ---
 
@@ -150,6 +150,44 @@ Donc deux **sources** différentes possibles pour l'occupation (niveau vs flux),
 2. **Interpréter** Ridge vs Boosting comme **complémentaires** ; en cas de forte divergence, utiliser le backtest et le ±10 % pour trancher ou pour justifier un futur modèle ensemble.  
 3. **Ne pas mélanger** les sorties de deux chaînes (direct vs via admissions) dans un même indicateur sans le préciser.  
 4. **Conserver** l'ordre HW → Ridge → SARIMA → MA comme choix par défaut, mais **évaluer** périodiquement (backtest) pour ajuster l'ordre ou le choix de modèle si des données réelles sont disponibles.
+
+---
+
+## 7. Simulation de scénarios : sur quoi se basent-ils ?
+
+Les scénarios (épidémie grippe, grève, canicule, afflux massif) sont définis dans **`config/constants.py`** (`SCENARIOS`) et exécutés par **`src/simulation/scenarios.py`**. Ils restent **cohérents avec le projet** sur les **seuils et la capacité**, mais n'utilisent **pas** le même moteur que la page Prévisions.
+
+### 7.1 Paramètres (config)
+
+| Scénario | Paramètres principaux | Source |
+|----------|------------------------|--------|
+| **Épidémie grippe** | +35 % admissions, 45 j, pic au jour 15 | `config/constants.py` |
+| **Grève** | −15 % capacité effective (lits), 14 j | id. |
+| **Canicule** | +15 % admissions, 21 j, pic au milieu | id. |
+| **Afflux massif** | +80 % admissions, 3 j, pic au jour 1 | id. |
+
+Même **capacité** (1800 lits) et **seuils d'alerte** (85 % / 95 %) que le reste du projet → cohérent.
+
+### 7.2 Base des scénarios (admissions)
+
+- **Scénarios « admissions »** (épidémie, canicule, afflux massif) : la **base** est la **moyenne des 28 derniers jours** de la série d'admissions historiques (`base_series.iloc[-28:].mean()`), **pas** la prévision Holt-Winters.
+- Une **courbe en cloche** (gaussienne) est appliquée pour modéliser le surplus (pic au `pic_jour`, amplitude `surplus_admissions`). Interprétation : « et si le niveau récent des admissions augmentait de X % selon cette forme de vague ».
+
+### 7.3 Occupation dans les scénarios
+
+- Pour les scénarios admissions, l’**occupation** est estimée par la règle **`admissions_scenario × 6`** (6 jours de séjour fixes), et le taux par division par la capacité (1800). Ce n’**est pas** le modèle stock utilisé en prévision (`predict_occupation_from_admissions` avec DMS saisonnière et inertie).
+- **Scénario grève** : base = moyenne 28 j de l’**occupation** observée ; on simule une **réduction de capacité effective** (ramp-up sur 2 j) et une **augmentation d’occupation** (0,8 %/j) pour mimiquer l’accumulation. Taux = occupation / capacité effective.
+
+### 7.4 Synthèse cohérence
+
+| Élément | Cohérent avec le projet ? |
+|--------|----------------------------|
+| Capacité (1800), seuils 85 % / 95 % | **Oui** |
+| Paramètres des scénarios (config) | **Oui** (référence rapport de conception, consignes) |
+| Base = moyenne 28 j (au lieu de prévision HW) | **Choix volontaire** : scénario = stress-test par rapport au « niveau récent », pas à la courbe prévisionnelle |
+| Occupation = admissions × 6 (au lieu du modèle stock) | **Simplification** : ordre de grandeur pour le stress-test ; pour une cohérence totale avec la prévision, on pourrait alimenter `predict_occupation_from_admissions` avec les admissions simulées du scénario |
+
+En résumé : les scénarios sont **alignés** sur la config (seuils, capacité, types d’événements) et sur l’objectif « tests de scénario » du projet. Ils s’appuient sur une **base simple** (moyenne 28 j) et une **règle d’occupation simplifiée** (× 6) pour rester lisibles et rapides ; une évolution possible est d’utiliser la prévision HW comme base et le modèle stock pour l’occupation si on souhaite une chaîne 100 % identique à la page Prévisions.
 
 ---
 

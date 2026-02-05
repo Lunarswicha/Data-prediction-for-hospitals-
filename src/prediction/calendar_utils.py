@@ -7,7 +7,7 @@ Utilisé comme variables dans la régression pour améliorer la prédiction du f
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
-from typing import Optional
+from typing import Optional, Union, cast
 
 # Jours fériés fixes (France)
 _FERIES_FIXES = [(1, 1), (5, 1), (5, 8), (7, 14), (8, 15), (11, 1), (11, 11), (12, 25)]
@@ -31,38 +31,50 @@ def _easter_year(y: int) -> date:
     return date(y, n, p)
 
 
-def is_jour_ferie(d: pd.Timestamp) -> bool:
+def is_jour_ferie(d: Union[pd.Timestamp, date]) -> bool:
     """True si la date est un jour férié français."""
+    if hasattr(pd, "isna") and bool(pd.isna(d)):
+        return False
     if isinstance(d, pd.Timestamp):
-        d = d.to_pydatetime().date()
-    month, day = d.month, d.day
+        d_norm = d.to_pydatetime().date()
+    else:
+        d_norm = d
+    month, day = d_norm.month, d_norm.day
     if (month, day) in _FERIES_FIXES:
         return True
-    year = d.year
+    year = d_norm.year
     easter = _easter_year(year)
     # Lundi Pâques, Ascension (E+39), Lundi Pentecôte (E+50)
     for delta in [1, 39, 50]:
-        if d == easter + timedelta(days=delta):
+        if d_norm == easter + timedelta(days=delta):
             return True
     return False
 
 
-def is_veille_ferie(d: pd.Timestamp) -> bool:
+def is_veille_ferie(d: Union[pd.Timestamp, date]) -> bool:
     """True si le lendemain est un jour férié (réf. Bouteloup)."""
+    if hasattr(pd, "isna") and bool(pd.isna(d)):
+        return False
     if isinstance(d, pd.Timestamp):
         next_d = d + pd.Timedelta(days=1)
     else:
         next_d = d + timedelta(days=1)
-    return is_jour_ferie(next_d)
+    if hasattr(pd, "isna") and bool(pd.isna(next_d)):
+        return False
+    return is_jour_ferie(cast(Union[pd.Timestamp, date], next_d))
 
 
-def is_lendemain_ferie(d: pd.Timestamp) -> bool:
+def is_lendemain_ferie(d: Union[pd.Timestamp, date]) -> bool:
     """True si la veille est un jour férié (réf. Bouteloup)."""
+    if hasattr(pd, "isna") and bool(pd.isna(d)):
+        return False
     if isinstance(d, pd.Timestamp):
         prev_d = d - pd.Timedelta(days=1)
     else:
         prev_d = d - timedelta(days=1)
-    return is_jour_ferie(prev_d)
+    if hasattr(pd, "isna") and bool(pd.isna(prev_d)):
+        return False
+    return is_jour_ferie(cast(Union[pd.Timestamp, date], prev_d))
 
 
 # Vacances scolaires zone C (Paris) — périodes approximatives (début, fin) par année
@@ -89,15 +101,19 @@ def _in_period(d: date, mo1: int, j1: int, mo2: int, j2: int, year: int) -> bool
     return d >= start or d <= end
 
 
-def is_vacances_scolaires_zone_c(d: pd.Timestamp) -> bool:
+def is_vacances_scolaires_zone_c(d: Union[pd.Timestamp, date]) -> bool:
     """True si la date est en vacances scolaires zone C (Paris). Réf. Bouteloup."""
+    if hasattr(pd, "isna") and bool(pd.isna(d)):
+        return False
     if isinstance(d, pd.Timestamp):
-        d = d.to_pydatetime().date()
-    y = d.year
+        d_norm = d.to_pydatetime().date()
+    else:
+        d_norm = d
+    y = d_norm.year
     for mo1, j1, mo2, j2 in _VACANCES_ZONE_C:
-        if _in_period(d, mo1, j1, mo2, j2, y):
+        if _in_period(d_norm, mo1, j1, mo2, j2, y):
             return True
-        if mo1 > mo2 and _in_period(d, mo1, j1, mo2, j2, y + 1):
+        if mo1 > mo2 and _in_period(d_norm, mo1, j1, mo2, j2, y + 1):
             return True
     return False
 

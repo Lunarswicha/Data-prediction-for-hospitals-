@@ -3,16 +3,20 @@ Tableau de bord interactif — MVP Pitié-Salpêtrière.
 Exploration des flux, prévisions, simulation de scénarios, recommandations.
 Lancer : streamlit run app/dashboard.py (depuis la racine du projet)
 """
+from __future__ import annotations
 
 import sys
 import warnings
 from pathlib import Path
 
-# Éviter que les messages de dépréciation (Streamlit, pandas, plotly) s'affichent au-dessus des graphiques
+# Bloquer les avertissements de dépréciation Streamlit/Plotly (keyword arguments → config)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", message=".*use_container_width.*", category=UserWarning)
-warnings.filterwarnings("ignore", message=".*keyword arguments have been deprecated.*", category=UserWarning)
-warnings.filterwarnings("ignore", message=".*Use config instead.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*keyword arguments.*")
+warnings.filterwarnings("ignore", message=".*deprecated.*")
+warnings.filterwarnings("ignore", message=".*Use config instead.*")
+warnings.filterwarnings("ignore", message=".*Variable keyword.*")
+warnings.filterwarnings("ignore", message=".*Plotly configuration.*")
+warnings.filterwarnings("ignore", module="streamlit.*")
 
 # Racine du projet
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +27,8 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from datetime import date, datetime
+from typing import Any, Optional, Union, cast
 
 from src.data.load import load_admissions, load_occupation
 from src.prediction.models import (
@@ -33,6 +39,7 @@ from src.prediction.models import (
     predict_moving_average,
     predict_occupation_direct,
     predict_occupation_from_admissions,
+    predict_admissions_best,
     evaluate_forecast_pct_within_10,
     evaluate_boosting_model,
     predict_boosting,
@@ -40,7 +47,37 @@ from src.prediction.models import (
     run_backtest_admissions,
     select_best_model_by_backtest,
 )
-from src.prediction.ensemble import predict_admissions_ensemble, get_ensemble_info
+
+
+def _scalar_date(x: object) -> Optional[date]:
+    """Retourne une date scalaire ou None pour st.date_input / pd.Timestamp (évite Series/NaT)."""
+    if x is None:
+        return None
+    if isinstance(x, pd.Series):
+        x = x.iloc[0] if len(x) else None
+    if x is None or (hasattr(pd, "isna") and bool(pd.isna(x))):
+        return None
+    if isinstance(x, (date, datetime)):
+        return x.date() if isinstance(x, datetime) else x
+    return cast(date, pd.Timestamp(cast(Union[int, float, str, date, datetime], x)).date())
+
+
+def _fmt_date(d: Any) -> str:
+    """Formate une date en JJ/MM/AAAA ou chaîne vide si invalide (accepte date, datetime, NaT, None)."""
+    if d is None or (hasattr(pd, "isna") and bool(pd.isna(d))):
+        return ""
+    if isinstance(d, (date, datetime)):
+        return d.strftime("%d/%m/%Y")
+    return str(d)
+
+
+def _fmt_date_iso(d: Any) -> str:
+    """Formate une date en AAAA-MM-JJ pour noms de fichier (accepte date, datetime, NaT, None)."""
+    if d is None or (hasattr(pd, "isna") and bool(pd.isna(d))):
+        return "unknown"
+    if isinstance(d, (date, datetime)):
+        return d.strftime("%Y-%m-%d")
+    return str(d)
 
 
 def _build_besoins_from_pred_df(pred_df: pd.DataFrame, capacite_lits: int = 1800) -> dict:
@@ -168,15 +205,14 @@ except FileNotFoundError as e:
 # Bornes des données pour les filtres
 _tmin = occupation_df["date"].min()
 _tmax = occupation_df["date"].max()
-date_min_data = pd.Timestamp(_tmin).date() if pd.notna(_tmin) else None
-date_max_data = pd.Timestamp(_tmax).date() if pd.notna(_tmax) else None
-if date_min_data is None or date_max_data is None:
-    date_min_data = date_min_data or pd.Timestamp("2022-01-01").date()
-    date_max_data = date_max_data or pd.Timestamp("2024-12-31").date()
+date_min_data = _scalar_date(_tmin)
+date_max_data = _scalar_date(_tmax)
+date_min_data = cast(date, date_min_data or pd.Timestamp("2022-01-01").date())
+date_max_data = cast(date, date_max_data or pd.Timestamp("2024-12-31").date())
 
 # Sidebar — logo ou intitulé
 if LOGO_PNG.exists():
-    st.sidebar.image(str(LOGO_PNG), use_container_width=True)
+    st.sidebar.image(str(LOGO_PNG), width="stretch")
 elif LOGO_SVG.exists():
     with open(LOGO_SVG, encoding="utf-8") as f:
         st.sidebar.markdown(f.read(), unsafe_allow_html=True)
@@ -221,7 +257,7 @@ st.markdown(
 
 # Bannière : photo du bâtiment Pitié-Salpêtrière (si disponible)
 if BATIMENT_PNG.exists():
-    st.image(str(BATIMENT_PNG), use_container_width=True, output_format="PNG")
+    st.image(str(BATIMENT_PNG), width="stretch", output_format="PNG")
 
 # --- Flux & historique ---
 if section == "Flux & historique":
@@ -258,27 +294,33 @@ if section == "Flux & historique":
     elif preset == "Été (juin–août)":
         default_debut, default_fin = summer_start, summer_end
     else:
-        _dmax = pd.Timestamp(date_max_data) if date_max_data is not None and pd.notna(date_max_data) else None
-        default_debut = (_dmax - pd.DateOffset(months=12)).date() if _dmax is not None and pd.notna(_dmax) else date_min_data
-        if default_debut < date_min_data:
+        _dmax = pd.Timestamp(date_max_data) if date_max_data is not None else None
+        if _dmax is not None and (not (hasattr(pd, "isna") and bool(pd.isna(_dmax)))):
+            default_debut = (cast(pd.Timestamp, _dmax) - pd.DateOffset(months=12)).date()
+        else:
             default_debut = date_min_data
-        default_fin = date_max_data
+        default_debut = _scalar_date(default_debut) or date_min_data
+        if default_debut is not None and date_min_data is not None and default_debut < date_min_data:
+            default_debut = date_min_data
+        default_fin = _scalar_date(date_max_data) or date_max_data
 
+    _min_val = _scalar_date(date_min_data) or date_min_data
+    _max_val = _scalar_date(date_max_data) or date_max_data
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
         date_debut_hist = st.date_input(
             "Du (date)",
-            value=default_debut if (default_debut is not None and (not hasattr(pd, "isna") or not pd.isna(default_debut))) else date_min_data,
-            min_value=date_min_data,
-            max_value=date_max_data,
+            value=_scalar_date(default_debut) or _min_val,
+            min_value=_min_val,
+            max_value=_max_val,
             key="hist_debut",
         )
     with col_f2:
         date_fin_hist = st.date_input(
             "Au (date)",
-            value=default_fin if (default_fin is not None and (not hasattr(pd, "isna") or not pd.isna(default_fin))) else date_max_data,
-            min_value=date_min_data,
-            max_value=date_max_data,
+            value=_scalar_date(default_fin) or _max_val,
+            min_value=_min_val,
+            max_value=_max_val,
             key="hist_fin",
         )
     with col_f3:
@@ -294,8 +336,14 @@ if section == "Flux & historique":
         st.warning("La date de début doit être antérieure à la date de fin. Affichage de la période complète.")
         date_debut_hist, date_fin_hist = date_min_data, date_max_data
 
-    ts_debut = pd.Timestamp(date_debut_hist)
-    ts_fin = pd.Timestamp(date_fin_hist)
+    _debut = _scalar_date(date_debut_hist) or date_min_data
+    _fin = _scalar_date(date_fin_hist) or date_max_data
+    ts_debut = pd.Timestamp(_debut) if _debut is not None else pd.Timestamp(date_min_data)
+    ts_fin = pd.Timestamp(_fin) if _fin is not None else pd.Timestamp(date_max_data)
+    # Mémoriser la période pour l’option "entraîner Holt-Winters sur cette période" dans Prévisions
+    if _debut is not None and _fin is not None:
+        st.session_state["hist_period_debut"] = _debut
+        st.session_state["hist_period_fin"] = _fin
     mask_occ = (occupation_df["date"] >= ts_debut) & (occupation_df["date"] <= ts_fin)
     mask_adm = (admissions_df["date"] >= ts_debut) & (admissions_df["date"] <= ts_fin)
     occ_filtree = occupation_df.loc[mask_occ].copy()
@@ -332,7 +380,7 @@ if section == "Flux & historique":
         freq_agg = "W-MON" if agg_periode == "Hebdomadaire" else None
 
     st.caption(
-        f"Période : **{date_debut_hist.strftime('%d/%m/%Y')}** → **{date_fin_hist.strftime('%d/%m/%Y')}** "
+        f"Période : **{_fmt_date(date_debut_hist)}** → **{_fmt_date(date_fin_hist)}** "
         f"({len(occ_filtree)} jours) · Services affichés : {len(services_choisis) if services_choisis else len(services_dispo)}"
     )
 
@@ -375,7 +423,7 @@ if section == "Flux & historique":
             )
             fig_adm.update_layout(height=400, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
             fig_adm.update_xaxes(tickformat="%d/%m/%Y")
-            st.plotly_chart(fig_adm, use_container_width=True)
+            st.plotly_chart(fig_adm, config={})
 
     with col2:
         st.subheader("Occupation des lits (taux)")
@@ -400,7 +448,7 @@ if section == "Flux & historique":
             fig_occ.add_hline(y=95, line_dash="dash", line_color="red")
             fig_occ.update_layout(height=400)
             fig_occ.update_xaxes(tickformat="%d/%m/%Y")
-            st.plotly_chart(fig_occ, use_container_width=True)
+            st.plotly_chart(fig_occ, config={})
 
     st.subheader("Répartition des admissions par service (sur la période filtrée)")
     if adm_filtree.empty:
@@ -410,8 +458,8 @@ if section == "Flux & historique":
         part = adm_filtree.groupby("service")["admissions"].sum().reset_index()
     if services_choisis:
         part = part[part["service"].isin(services_choisis)]
-    fig_pie = px.pie(part, values="admissions", names="service", title=f"Répartition du {date_debut_hist.strftime('%d/%m/%Y')} au {date_fin_hist.strftime('%d/%m/%Y')}")
-    st.plotly_chart(fig_pie, use_container_width=True)
+    fig_pie = px.pie(part, values="admissions", names="service", title=f"Répartition du {_fmt_date(date_debut_hist)} au {_fmt_date(date_fin_hist)}")
+    st.plotly_chart(fig_pie, config={})
 
     st.subheader("Répartition calendaire (heatmap)")
     st.caption("Moyenne des admissions (ou du taux d'occupation) par **jour de la semaine** et **mois**, sur la période filtrée.")
@@ -443,7 +491,7 @@ if section == "Flux & historique":
                 yaxis_title="Mois",
                 height=400,
             )
-            st.plotly_chart(fig_hm_adm, use_container_width=True)
+            st.plotly_chart(fig_hm_adm, config={})
         else:
             st.info("Aucune donnée pour la heatmap admissions.")
     with col_hm2:
@@ -471,16 +519,40 @@ if section == "Flux & historique":
                 yaxis_title="Mois",
                 height=400,
             )
-            st.plotly_chart(fig_hm_occ, use_container_width=True)
+            st.plotly_chart(fig_hm_occ, config={})
         else:
             st.info("Aucune donnée pour la heatmap occupation.")
 
 # --- Prévisions ---
 elif section == "Prévisions":
+    MIN_DAYS_TRAIN = 14  # Holt-Winters : au moins 2× saisonnalité (7 j)
     st.header("Prévisions d'occupation des lits")
-    st.caption("Prévisions par ensemble automatique de modèles. Intervalles de confiance à 95%.")
-    # ----- 1. Période -----
-    last_date = occupation_df["date"].max()
+    st.caption("Prévisions par Holt-Winters (statsmodels). Intervalles de confiance à 95%.")
+    # ----- 1. Période et données d'entraînement -----
+    hist_debut = st.session_state.get("hist_period_debut")
+    hist_fin = st.session_state.get("hist_period_fin")
+    use_hist_period = False
+    if hist_debut is not None and hist_fin is not None:
+        use_hist_period = st.checkbox(
+            "Utiliser la période **Flux & historique** pour l'entraînement du modèle Holt-Winters",
+            value=False,
+            key="pred_use_hist_period",
+            help="Si coché, le modèle est entraîné uniquement sur les dates sélectionnées dans Flux & historique. Les prévisions commencent au lendemain de la fin de cette période.",
+        )
+    if use_hist_period and hist_debut is not None and hist_fin is not None:
+        ts_hist_debut = pd.Timestamp(hist_debut)
+        ts_hist_fin = pd.Timestamp(hist_fin)
+        mask_train = (occupation_df["date"] >= ts_hist_debut) & (occupation_df["date"] <= ts_hist_fin)
+        occupation_train = occupation_df.loc[mask_train].copy()
+        if occupation_train["date"].nunique() < MIN_DAYS_TRAIN:
+            st.warning(
+                f"Période Flux & historique trop courte (au moins {MIN_DAYS_TRAIN} jours). Entraînement sur tout l'historique."
+            )
+            use_hist_period = False
+            occupation_train = occupation_df
+    else:
+        occupation_train = occupation_df
+    last_date = occupation_train["date"].max()
     start_prevision = last_date + pd.Timedelta(days=1)
     start_prevision_date = start_prevision.date() if hasattr(start_prevision, "date") else pd.Timestamp(start_prevision).date()
     HORIZON_MAX_JOURS = 180
@@ -497,56 +569,30 @@ elif section == "Prévisions":
     end_prevision_date = (start_prevision + pd.Timedelta(days=horizon - 1)).date()
     if isinstance(end_prevision_date, pd.Timestamp):
         end_prevision_date = end_prevision_date.date()
-    _start_str = start_prevision_date.strftime("%d/%m/%Y") if (hasattr(start_prevision_date, "strftime") and pd.notna(start_prevision_date)) else str(start_prevision_date)
-    _end_str = end_prevision_date.strftime("%d/%m/%Y") if (hasattr(end_prevision_date, "strftime") and pd.notna(end_prevision_date)) else str(end_prevision_date)
+    _start_str = _fmt_date(start_prevision_date)
+    _end_str = _fmt_date(end_prevision_date)
     st.markdown(f"**Du {_start_str} au {_end_str}** — **{horizon} jours**")
-
+    if use_hist_period and hist_debut is not None and hist_fin is not None:
+        st.caption(f"Données d'entraînement : du {_fmt_date(hist_debut)} au {_fmt_date(hist_fin)} ({len(occupation_train)} jours).")
 
     CAPACITE = 1800
 
-    # Calcul automatique par ensemble pondéré
+    # Prévisions : predict_admissions_best → Holt-Winters statsmodels puis modèle stock
     with st.spinner("Calcul en cours..."):
-        adm_series = prepare_series(occupation_df, "admissions_jour")
-        
-        # Prédiction par ensemble (on garde la variation des modèles : mois, saison, etc.)
-        pred_adm_ensemble = predict_admissions_ensemble(adm_series, horizon_jours=horizon)
+        adm_series = prepare_series(occupation_train, "admissions_jour")
+        pred_adm = predict_admissions_best(adm_series, horizon_jours=horizon)
 
-        # Déduire l'occupation (saisonnalité hiver/été appliquée dans le modèle stock)
         pred_df = predict_occupation_from_admissions(
-            occupation_df,
+            occupation_train,
             horizon_jours=horizon,
             use_best_admissions=False,
             duree_sejour_saisonniere=True,
-            pred_adm=pred_adm_ensemble,
+            pred_adm=pred_adm,
             capacite_lits=CAPACITE,
         )
-        
         besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
-        
-        # Informations sur l'ensemble
-        ensemble_info = get_ensemble_info(adm_series)
 
     pred_df = besoins["previsions"]
-
-    # ----- Résultats -----
-    st.subheader("Résultats")
-    
-    # Afficher les modèles utilisés (collapsible)
-    with st.expander("ℹ️ Méthodologie d'ensemble"):
-        st.markdown(
-            f"**Validation** : Backtest sur les {ensemble_info['validation_days']} derniers jours.\n\n"
-            f"**Top 3 des modèles retenus** (pondération par performance sur ±10%) :"
-        )
-        for nom in ensemble_info['top3_names']:
-            poids = ensemble_info['weights'].get(nom, 0)
-            perf = ensemble_info['all_performances'].get(nom, {})
-            st.markdown(
-                f"- **{nom}** ({poids:.0f}%) : Précision ±10% = {perf.get('pct_within_10', 0):.1f}% | MAE = {perf.get('mae', 0):.1f}"
-            )
-        st.caption(
-            "Les prévisions finales sont la moyenne pondérée des 3 modèles. "
-            "Les intervalles  de confiance reflètent la variabilité entre modèles."
-        )
 
     # Graphique principal
     fig_pred = go.Figure()
@@ -576,9 +622,9 @@ elif section == "Prévisions":
         )
     fig_pred.add_hline(y=1800 * 0.85, line_dash="dash", line_color="orange")
     fig_pred.add_hline(y=1800 * 0.95, line_dash="dash", line_color="red")
-    fig_pred.update_layout(height=350, title="Occupation prévue — Ensemble pondéré")
+    fig_pred.update_layout(height=350, title="Occupation prévue — Holt-Winters (statsmodels)")
     fig_pred.update_xaxes(tickformat="%d/%m/%Y")
-    st.plotly_chart(fig_pred, use_container_width=True)
+    st.plotly_chart(fig_pred, config={})
 
     # Indicateurs et recommandation
     col_k1, col_k2 = st.columns(2)
@@ -600,7 +646,7 @@ elif section == "Prévisions":
         pred_display["admissions_pred"] = pred_display["admissions_pred"].apply(
             lambda x: round(x, 1) if pd.notna(x) else "—"
         )
-    st.dataframe(pred_display, use_container_width=True)
+    st.dataframe(pred_display, width="stretch")
 
     with st.expander("Validation du modèle (réf. Bouteloup : critère ±10 %)"):
         adm_series = occupation_df.set_index("date")["admissions_jour"]
@@ -689,11 +735,11 @@ elif section == "Prévisions":
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         fig_bt.update_xaxes(tickformat="%d/%m/%Y")
-        st.plotly_chart(fig_bt, use_container_width=True)
+        st.plotly_chart(fig_bt, config={})
         with st.expander("Voir les données du backtest"):
             bt_display = bt_df.copy()
             bt_display["date"] = pd.to_datetime(bt_display["date"]).dt.strftime("%d/%m/%Y")
-            st.dataframe(bt_display, use_container_width=True)
+            st.dataframe(bt_display, width="stretch")
 
     st.subheader("Export")
     export_cols = [c for c in ["date", "occupation_lits_pred", "admissions_pred", "taux_occupation_pred", "alerte"] if c in pred_df.columns]
@@ -703,7 +749,7 @@ elif section == "Prévisions":
     st.download_button(
         "Télécharger les prévisions (CSV)",
         data=csv_bytes,
-        file_name=f"previsions_{end_prevision_date.strftime('%Y-%m-%d')}.csv",
+        file_name=f"previsions_{_fmt_date_iso(end_prevision_date)}.csv",
         mime="text/csv",
         key="dl_previsions",
     )
@@ -773,10 +819,10 @@ elif section == "Modèle Boosting (apprentissage)":
                 )
             fig_boost.update_layout(height=350, title="Prévision des admissions (modèle boosting)")
             fig_boost.update_xaxes(tickformat="%d/%m/%Y")
-            st.plotly_chart(fig_boost, use_container_width=True)
+            st.plotly_chart(fig_boost, config={})
             st.dataframe(
                 pred_boost.assign(date=pd.to_datetime(pred_boost["date"]).dt.strftime("%d/%m/%Y")),
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.info("Prévision boosting non disponible (vérifier les dépendances : xgboost ou scikit-learn).")
@@ -825,8 +871,8 @@ elif section == "Simulation de scénarios":
                 fig = px.line(df, x="date", y="admissions_scenario", title="Admissions simulées")
             fig.update_layout(height=400)
             fig.update_xaxes(tickformat="%d/%m/%Y")
-            st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(df, use_container_width=True)
+            st.plotly_chart(fig, config={})
+            st.dataframe(df, width="stretch")
             df_export = df.copy()
             df_export["date"] = pd.to_datetime(df_export["date"]).dt.strftime("%Y-%m-%d")
             st.download_button(
@@ -854,15 +900,4 @@ elif section == "Recommandations":
             st.markdown(format_recommendations_for_dashboard(reco_sc))
 
 st.sidebar.markdown("---")
-with st.sidebar.expander("À propos des modèles (M2)"):
-    st.caption(
-        "**Prédiction** : Holt-Winters (saisonnalité 7j), régression Ridge (lags 1–7–14, mean j-7 à j-13, "
-        "jours fériés, vacances, température synth. — réf. Bouteloup), durée de séjour saisonnière (réf. Lequertier). "
-        "**Boosting** : XGBoost ou GBM (mêmes variables + splines type GAM). **Régression** : splines sur jour/mois/temp. pour effets non linéaires (veille thèses). "
-        "Validation : critère ±10 %, biais (surestimation/sous-estimation). "
-        "Justification détaillée : voir docs/01-rapport-conception/JUSTIFICATION-MODELES-PREDICTION.md. "
-        "Cohérence / complémentarité des modèles : docs/03-modeles-et-resultats/COHERENCE-MODELES-PREVISION.md. "
-        "Explication des % (taux, % à ±10 %) : docs/03-modeles-et-resultats/EXPLICATION-POURCENTAGES.md. "
-        "Pistes d’évolution : docs/05-reference/PISTES-EVOLUTION.md. Vue d'ensemble : docs/VUE-ENSEMBLE-PROJET.md"
-    )
 st.sidebar.caption("Projet Data Promo 2026 — Données fictives, pas de données réelles.")

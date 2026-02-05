@@ -1,25 +1,55 @@
 """
 Simulation de scénarios — épidémie, grève, canicule, afflux massif.
 Applique les paramètres des scénarios (config) sur les prévisions ou séries historiques.
+Les scénarios sont décalés automatiquement vers leur saison typique (canicule → été, grippe → hiver).
 """
 
 import numpy as np
 import pandas as pd
 from datetime import timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 
 try:
     from config.constants import SCENARIOS, CAPACITE_LITS_TOTALE, SEUIL_ALERTE_OCCUPATION
 except ImportError:
     SCENARIOS = {
-        "epidemie_grippe": {"surplus_admissions": 0.35, "duree_jours": 45, "pic_jour": 15},
-        "greve": {"reduction_personnel": 0.25, "reduction_capacite_lits": 0.15, "duree_jours": 14},
-        "canicule": {"surplus_admissions": 0.15, "duree_jours": 21},
-        "afflux_massif": {"surplus_admissions": 0.80, "duree_jours": 3, "pic_jour": 1},
+        "epidemie_grippe": {"surplus_admissions": 0.08, "duree_jours": 45, "pic_jour": 15, "mois_saison": (11, 12, 1, 2, 3)},
+        "greve": {"reduction_personnel": 0.08, "reduction_capacite_lits": 0.05, "duree_jours": 14},
+        "canicule": {"surplus_admissions": 0.04, "duree_jours": 21, "pic_jour": 10, "mois_saison": (6, 7, 8)},
+        "afflux_massif": {"surplus_admissions": 0.10, "duree_jours": 3, "pic_jour": 1},
     }
     CAPACITE_LITS_TOTALE = 1800
     SEUIL_ALERTE_OCCUPATION = 0.85
+
+
+def _start_date_selon_saison(
+    scenario_key: str,
+    start_par_defaut: pd.Timestamp,
+) -> pd.Timestamp:
+    """
+    Déplace la date de début du scénario dans la saison typique (Paris / Île-de-France).
+    - Canicule : juin–août ; si la date par défaut est hors été → 1er juin (cette année ou suivante).
+    - Épidémie grippe : nov.–mars ; si hors hiver → 1er décembre.
+    - Grève / afflux massif : pas de décalage.
+    """
+    conf = SCENARIOS.get(scenario_key, {})
+    mois_saison: Optional[Tuple[int, ...]] = conf.get("mois_saison")
+    if not mois_saison:
+        return start_par_defaut
+    ts = pd.Timestamp(start_par_defaut)
+    mois = ts.month
+    if mois in mois_saison:
+        return start_par_defaut
+    if scenario_key == "canicule":
+        # Prochain été : jan–mai → 1er juin même année ; sept–déc → 1er juin année suivante
+        if mois <= 5:
+            return pd.Timestamp(ts.year, 6, 1)
+        return pd.Timestamp(ts.year + 1, 6, 1)
+    if scenario_key == "epidemie_grippe":
+        # Prochain hiver : on n'arrive ici que si mois in (4..10), donc 1er décembre même année
+        return pd.Timestamp(ts.year, 12, 1)
+    return start_par_defaut
 
 
 def _curve_pic(jours: int, pic_jour: int, duree: int) -> np.ndarray:
@@ -50,7 +80,8 @@ def apply_scenario_admissions(
     surplus = conf.get("surplus_admissions", 0.2)
     pic_jour = conf.get("pic_jour", duree // 2)
 
-    start = start_date or base_series.index[-1] + timedelta(days=1)
+    start_brut = start_date or (pd.Timestamp(base_series.index[-1]) + timedelta(days=1))
+    start = _start_date_selon_saison(scenario_key, start_brut)
     dates = pd.date_range(start, periods=duree, freq="D")
     base_mean = base_series.iloc[-28:].mean() if len(base_series) >= 28 else base_series.mean()
     curve = _curve_pic(0, pic_jour, duree)
@@ -86,12 +117,14 @@ def apply_scenario_greve(
     reduction_lits = conf.get("reduction_capacite_lits", 0.15)
     duree = duree_jours_override if duree_jours_override is not None else conf.get("duree_jours", 14)
     duree = max(7, min(duree, 365))
-    start = start_date or occupation_quotidienne["date"].max() + timedelta(days=1)
+    start_brut = start_date or (pd.Timestamp(occupation_quotidienne["date"].max()) + timedelta(days=1))
+    start = _start_date_selon_saison(scenario_key, start_brut)
     dates = pd.date_range(start, periods=duree, freq="D")
 
     occ_mean = occupation_quotidienne["occupation_lits"].iloc[-28:].mean()
-    # Accumulation quotidienne (retards de sortie, moindre rotation) : +0,5 % à 1,5 % par jour
-    croissance_quotidienne = 0.008  # 0,8 % par jour
+    # Accumulation réaliste : max +8 % sur la période (retards de sortie), pas de croissance infinie
+    croissance_quotidienne = 0.002  # 0,2 % par jour
+    plafond_croissance = 0.08  # max +8 % par rapport au niveau initial
 
     rows = []
     for i, d in enumerate(dates):
@@ -103,9 +136,11 @@ def apply_scenario_greve(
         else:
             facteur_reduction = reduction_lits * 0.85  # légère reprise en fin
         capacite_effective = CAPACITE_LITS_TOTALE * (1 - facteur_reduction)
-        # Occupation qui augmente légèrement (effet file d'attente)
-        occupation_jour = occ_mean * (1 + croissance_quotidienne * i)
+        # Occupation : légère hausse plafonnée (effet file d'attente réaliste)
+        mult_croissance = min(croissance_quotidienne * i, plafond_croissance)
+        occupation_jour = occ_mean * (1 + mult_croissance)
         taux_eff = occupation_jour / capacite_effective if capacite_effective > 0 else 0
+        taux_eff = min(1.0, taux_eff)  # plafonné à 100 %
         rows.append({
             "date": d,
             "occupation_lits": occupation_jour,
@@ -146,7 +181,7 @@ def run_scenario(
             )  # approx 6 j séjour
             result_df["taux_occupation_estime"] = (
                 result_df["occupation_estimee"] / CAPACITE_LITS_TOTALE
-            )
+            ).clip(upper=1.25)  # plafonné à 125 % pour démo (base ~100 % + scénario doux)
             taux_max = result_df["taux_occupation_estime"].max()
         else:
             taux_max = 0
