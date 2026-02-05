@@ -1,8 +1,10 @@
-# Livrable 1 — Rapport de conception et d'analyse hospitalière
+# Livrable 1 — Un seul document
+
+**Rapport de conception et d'analyse hospitalière + Étude d'impact et recommandations stratégiques = 1 document**
 
 *Consignes : présentation des fonctionnalités du prototype, méthodologie, analyse des tendances, analyse statistique, modèles, évaluation de l’impact.*
 
-**Littérature** : voir `../ANALYSE-CRITIQUE-LITTERATURE-THESES.md` (thèses Lequertier, Bouteloup) pour constats à intégrer dans ce rapport.
+**Littérature** : voir `../04-litterature/ANALYSE-CRITIQUE-LITTERATURE-THESES.md` (thèses Lequertier, Bouteloup) pour constats à intégrer dans ce rapport.
 
 **Justification des modèles (niveau M2)** : voir `JUSTIFICATION-MODELES-PREDICTION.md` pour les choix méthodologiques, hypothèses, limites et protocole de validation des modèles de prédiction.
 
@@ -28,7 +30,12 @@
    - **Justification détaillée** : familles envisagées (séries temporelles, régression, ML), choix retenus (Holt-Winters, régression Ridge, SARIMA, modèle stock), hypothèses et limites (réf. `JUSTIFICATION-MODELES-PREDICTION.md`).
    - Évaluation (métrique ±10 %, biais, IC 95 %) et impact de leur utilisation.
 
-6. **Synthèse & perspectives**
+6. **Étude d'impact et recommandations stratégiques** *(partie intégrante de ce document)*
+   - Efficacité de l'outil sur la gestion hospitalière.
+   - Comparaison avec les solutions existantes.
+   - Recommandations stratégiques et évolutions futures possibles.
+
+7. **Synthèse & perspectives**
    - Synthèse des résultats, limites, pistes d’amélioration.
 
 ---
@@ -39,6 +46,7 @@
 
 ---
 
-À rédiger dans ce dossier :  
-- `rapport-conception.md` (ou .docx / .pdf exporté)  
-- Figures, dataviz exportées depuis les notebooks / le prototype.
+**Livrables dans ce dossier :**
+- `rapport-conception.md` — Rapport de conception + étude d'impact et recommandations stratégiques (source).
+- `rapport-conception.pdf` — Même rapport exporté en PDF.
+- Figures, dataviz : à exporter depuis les notebooks / le prototype si besoin.

@@ -14,13 +14,17 @@ L’Hôpital Pitié-Salpêtrière (Paris) doit anticiper les pics d’admission 
 
 ```
 Data Hopital/
-├── README.md                      ← Vous êtes ici
+├── README.md                      (vous êtes ici)
 ├── CONFORMITE.md                  Conformité données de santé (RGPD, éthique)
 │
-├── docs/                          LIVRABLES DOCUMENTAIRES
+├── docs/                          DOCUMENTATION (voir docs/README.md)
+│   ├── README.md                  Index par catégories
+│   ├── VUE-ENSEMBLE-PROJET.md     Explication globale, rapports, chiffres, modèles
 │   ├── 01-rapport-conception/     Rapport de conception et d'analyse hospitalière
 │   ├── 02-rapport-strategique/    Rapport stratégique
-│   ├── ANALYSE-CRITIQUE-LITTERATURE-THESES.md  Analyse des thèses Lequertier & Bouteloup
+│   ├── 03-modeles-et-resultats/   Modèles, cohérence, explication des %
+│   ├── 04-litterature/            Thèses (Lequertier, Bouteloup), veille
+│   ├── 05-reference/              Consignes, pistes d'évolution
 │   └── soutenance/                Plan et support soutenance (20 min)
 │
 ├── data/                          DONNÉES
@@ -67,23 +71,16 @@ Data Hopital/
 
 ---
 
-## Livrables attendus (rappel)
+## Livrables attendus (2 rapports + 1 prototype)
 
-1. **Rapport de conception et d'analyse hospitalière**  
-   Fonctionnalités du prototype, méthodologie, tendances d’admissions, analyse statistique, dataviz justifiées, modèles statistiques et de prédiction, impact.
+1. **Document 1** — Rapport de conception et d'analyse hospitalière **+** Étude d'impact et recommandations stratégiques **= 1 document**  
+   → `docs/01-rapport-conception/`
 
-2. **Prototype fonctionnel**  
-   Interface (flux + simulation de scénarios), modélisation des tendances, prévisions (lits, personnel, matériel), tableau de bord interactif.
+2. **Document 2** — Rapport stratégique et marketing **= 1 document**  
+   → `docs/02-rapport-strategique/`
 
-3. **Rapport stratégique**  
-   Freins/leviers d’adoption, recommandations, impact (attente, coûts, ressources), comparaison avec l’existant, perspectives.
-
----
-
-## Ressources (consignes)
-
-- [INSEE](https://www.insee.fr/fr/statistiques)
-- [DREES](https://drees.solidarites-sante.gouv.fr)
+3. **Prototype** — Simple, efficace (tableau de bord, prévisions, simulation, recommandations)  
+   → `app/` · `src/`v.fr)
 - [Santé publique France – Géodes](https://geodes.santepubliquefrance.fr)
 - [data.gouv.fr – Données santé](https://www.data.gouv.fr/fr/pages/donnees_sante/)
 

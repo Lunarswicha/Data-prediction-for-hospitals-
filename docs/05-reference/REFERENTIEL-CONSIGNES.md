@@ -2,6 +2,8 @@
 
 Ce document permet de vérifier que chaque point des consignes officielles est couvert.
 
+**Vérification détaillée (PDF § 1.1 à 1.5)** : voir **[VERIFICATION-CONSIGNES.md](VERIFICATION-CONSIGNES.md)** pour une grille point par point avec statut (OK / Partiel / À finaliser) et les actions restantes.
+
 ---
 
 ## 1. Dimensions du projet (PDF § 1.2)
@@ -69,5 +71,15 @@ Ce document permet de vérifier que chaque point des consignes officielles est c
 - INSEE, DREES, Géodes, data.gouv.fr — liens dans `README.md`.
 
 ---
+
+## Résumé statut par rapport au PDF
+
+| Bloc | Couverture | À finaliser |
+|------|------------|-------------|
+| Dimensions du projet (données, MVP, conformité, scénarios, etc.) | OK / Partiel | Rédaction des sections analyse fonctionnelle et stratégique dans les **rapports** |
+| Rapport de conception | Partiel | Rédiger le **rapport** (structure prête dans `01-rapport-conception/`) |
+| Prototype fonctionnel | OK | Prévision « personnel / matériel » = via recommandations (lits en prévision directe) |
+| Rapport stratégique | Partiel | Rédiger le **rapport** (structure prête dans `02-rapport-strategique/`) |
+| Soutenance | OK | Déposer le **support** dans `soutenance/` et vérifier le plan |
 
 *Document de suivi à cocher au fur et à mesure de l’avancement.*

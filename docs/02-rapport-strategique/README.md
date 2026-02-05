@@ -1,8 +1,10 @@
-# Livrable 2 — Rapport stratégique
+# Livrable 2 — Un seul document
+
+**Rapport stratégique et marketing = 1 document**
 
 *Consignes : freins/leviers d’adoption, recommandations, impact sur la gestion hospitalière, comparaison avec l’existant, perspectives.*
 
-**Littérature** : voir `../ANALYSE-CRITIQUE-LITTERATURE-THESES.md` (thèses Lequertier, Bouteloup ; impact Batal et al., comparaison GAM/ARIMA/NN).
+**Littérature** : voir `../04-litterature/ANALYSE-CRITIQUE-LITTERATURE-THESES.md` (thèses Lequertier, Bouteloup ; impact Batal et al., comparaison GAM/ARIMA/NN).
 
 ---
 
@@ -32,5 +34,6 @@
 
 ---
 
-À rédiger dans ce dossier :  
-- `rapport-strategique.md` (ou .docx / .pdf exporté).
+**Livrables dans ce dossier :**
+- `rapport-strategique.md` — Rapport stratégique et marketing (source).
+- `rapport-strategique.pdf` — Même rapport exporté en PDF.

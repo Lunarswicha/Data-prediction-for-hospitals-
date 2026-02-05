@@ -133,7 +133,8 @@ def predict_holt_winters(
 def _build_lag_calendar_features(series: pd.Series, horizon: int, use_calendar_ferie: bool = True, use_temperature: bool = True) -> Tuple:
     """
     Construit les features pour X_train et X_pred.
-    Lags 1, 7, 14 + mean(j-7 à j-13) (Bouteloup) + jour_semaine, mois + jours fériés, vacances (Bouteloup) + température synthétique (optionnel).
+    Lags 1, 7, 14 + mean(j-7 à j-13) (Bouteloup) + jour_semaine, mois + jours fériés, vacances (Bouteloup)
+    + température synthétique (optionnel) + saison_grippe (nov–mars), mois_hiver (déc–fév) pour pics épidémiques.
     Retourne (X_train, y_train, X_pred, pred_dates).
     """
     series = _ensure_daily_index(series)
@@ -147,6 +148,11 @@ def _build_lag_calendar_features(series: pd.Series, horizon: int, use_calendar_f
         df["lag_mean_7_13"] = lag_7_13
     df["jour_semaine"] = df.index.dayofweek
     df["mois"] = df.index.month
+    df["jour_du_mois"] = df.index.day  # 1-31 : permet un effet fin/début de mois
+    df["fin_mois"] = (df.index.day >= 28).astype(int)  # dernier tiers du mois (activité souvent plus forte)
+    # Saison grippe / hiver (nov–mars) et mois d'hiver stricts (déc–fév) pour que le ML apprenne les pics épidémiques
+    df["saison_grippe"] = df["mois"].isin((11, 12, 1, 2, 3)).astype(int)
+    df["mois_hiver"] = df["mois"].isin((12, 1, 2)).astype(int)
     if use_calendar_ferie:
         df["jour_ferie"] = np.array([1 if is_jour_ferie(d) else 0 for d in df.index])
         df["veille_ferie"] = np.array([1 if is_veille_ferie(d) else 0 for d in df.index])
@@ -177,6 +183,10 @@ def _build_lag_calendar_features(series: pd.Series, horizon: int, use_calendar_f
             row["lag_mean_7_13"] = np.nanmean(vals) if any(np.isfinite(vals)) else np.nan
         row["jour_semaine"] = d.dayofweek
         row["mois"] = d.month
+        row["jour_du_mois"] = d.day
+        row["fin_mois"] = 1 if d.day >= 28 else 0
+        row["saison_grippe"] = 1 if d.month in (11, 12, 1, 2, 3) else 0
+        row["mois_hiver"] = 1 if d.month in (12, 1, 2) else 0
         if use_calendar_ferie:
             row["jour_ferie"] = 1 if is_jour_ferie(d) else 0
             row["veille_ferie"] = 1 if is_veille_ferie(d) else 0
@@ -197,14 +207,16 @@ def _build_lag_calendar_features(series: pd.Series, horizon: int, use_calendar_f
 def predict_regression(
     series: pd.Series,
     horizon_jours: int = 14,
+    use_splines: bool = True,
 ) -> Optional[pd.DataFrame]:
     """
-    Prévision par régression Ridge sur lags (1, 7, 14) + jour_semaine + mois.
-    Retourne prediction + intervalles approximatifs (écart-type des résidus).
+    Prévision par régression Ridge sur lags (1, 7, 14) + calendrier.
+    Si use_splines=True (défaut), approximation GAM par splines (Bouteloup) sur
+    jour_semaine, jour_du_mois, température pour capturer des effets non linéaires.
     """
     try:
         from sklearn.linear_model import Ridge
-        from sklearn.preprocessing import StandardScaler
+        from sklearn.preprocessing import StandardScaler, SplineTransformer
     except ImportError:
         return None
 
@@ -214,6 +226,23 @@ def predict_regression(
     X_train, y_train, X_pred, pred_dates = out
     if X_train.empty or X_pred.empty:
         return None
+
+    spl_cols = [c for c in ["jour_semaine", "jour_du_mois", "temperature"] if c in X_train.columns]
+    if use_splines and len(spl_cols) >= 1:
+        other_cols = [c for c in X_train.columns if c not in spl_cols]
+        X_train_other = X_train[other_cols].copy()
+        X_pred_other = X_pred[other_cols].copy()
+        for c in other_cols:
+            if X_pred_other[c].isna().any():
+                X_pred_other[c] = X_pred_other[c].fillna(X_train_other[c].mean())
+        spline = SplineTransformer(n_knots=5, degree=3)
+        X_train_spl = spline.fit_transform(X_train[spl_cols])
+        X_pred_spl = spline.transform(X_pred[spl_cols])
+        X_train = np.hstack([X_train_other.values, X_train_spl])
+        X_pred = np.hstack([X_pred_other.values, X_pred_spl])
+    else:
+        X_train = X_train.values
+        X_pred = X_pred.values
 
     scaler = StandardScaler()
     Xt = scaler.fit_transform(X_train)
@@ -239,10 +268,10 @@ def predict_regression(
 def predict_boosting(
     series: pd.Series,
     horizon_jours: int = 14,
+    use_splines: bool = True,
 ) -> Optional[pd.DataFrame]:
     """
-    Prévision par modèle de type boosting (XGBoost si dispo, sinon GradientBoostingRegressor).
-    Mêmes features que la régression Ridge (lags + calendrier). Apprend du passé.
+    Prévision par boosting (XGBoost ou GBM). Mêmes features que Ridge + option splines (type GAM).
     """
     try:
         import xgboost as xgb
@@ -251,7 +280,7 @@ def predict_boosting(
         _use_xgb = False
     try:
         from sklearn.ensemble import GradientBoostingRegressor
-        from sklearn.preprocessing import StandardScaler
+        from sklearn.preprocessing import StandardScaler, SplineTransformer
     except ImportError:
         return None
 
@@ -261,6 +290,23 @@ def predict_boosting(
     X_train, y_train, X_pred, pred_dates = out
     if X_train.empty or X_pred.empty:
         return None
+
+    spl_cols = [c for c in ["jour_semaine", "jour_du_mois", "temperature"] if c in X_train.columns]
+    if use_splines and len(spl_cols) >= 1:
+        other_cols = [c for c in X_train.columns if c not in spl_cols]
+        X_train_other = X_train[other_cols].copy()
+        X_pred_other = X_pred[other_cols].copy()
+        for c in other_cols:
+            if X_pred_other[c].isna().any():
+                X_pred_other[c] = X_pred_other[c].fillna(X_train_other[c].mean())
+        spline = SplineTransformer(n_knots=5, degree=3)
+        X_train_spl = spline.fit_transform(X_train[spl_cols])
+        X_pred_spl = spline.transform(X_pred[spl_cols])
+        X_train = np.hstack([X_train_other.values, X_train_spl])
+        X_pred = np.hstack([X_pred_other.values, X_pred_spl])
+    else:
+        X_train = X_train.values
+        X_pred = X_pred.values
 
     scaler = StandardScaler()
     Xt = scaler.fit_transform(X_train)
@@ -398,14 +444,20 @@ def predict_sarima(
         return None
 
     forecast = fit.get_forecast(steps=horizon_jours)
-    pred = forecast.predicted_values.values
+    # Utiliser summary_frame() pour éviter tout accès à predicted_mean/predicted_values
+    # (selon version statsmodels, le wrapper peut lever AttributeError)
     try:
-        ci = forecast.conf_int(alpha=0.05)
-        low = ci.iloc[:, 0].values
-        high = ci.iloc[:, 1].values
+        sf = forecast.summary_frame(alpha=0.05)
     except Exception:
-        low = np.maximum(0, pred - 1.96 * np.sqrt(fit.params.get("sigma2", pred.var())))
-        high = pred + 1.96 * np.sqrt(fit.params.get("sigma2", pred.var()))
+        sf = forecast.summary_frame()
+    pred = np.asarray(sf["mean"]).ravel()
+    if "mean_ci_lower" in sf.columns and "mean_ci_upper" in sf.columns:
+        low = np.asarray(sf["mean_ci_lower"]).ravel()
+        high = np.asarray(sf["mean_ci_upper"]).ravel()
+    else:
+        se = np.asarray(sf["mean_se"]).ravel() if "mean_se" in sf.columns else np.full_like(pred, np.sqrt(float(fit.params.get("sigma2", 1))))
+        low = np.maximum(0, pred - 1.96 * se)
+        high = pred + 1.96 * se
 
     dates = pd.date_range(series.index[-1] + pd.Timedelta(days=1), periods=horizon_jours, freq="D")
     return pd.DataFrame({
@@ -424,26 +476,52 @@ def predict_admissions_best(
     prefer: str = "holt_winters",
 ) -> pd.DataFrame:
     """
-    Prévision des admissions : essaie Holt-Winters, puis régression, puis SARIMA, puis moyenne glissante.
-    prefer : "holt_winters" | "regression" | "sarima" | "ma"
+    Prévision des admissions : essaie Holt-Winters, régression, Boosting (ML), SARIMA, puis moyenne glissante.
+    Le Boosting apprend du jeu actuel (lags, calendrier, saison_grippe, mois_hiver) pour affiner les prévisions.
+    prefer : "holt_winters" | "regression" | "boosting" | "sarima" | "ma"
     """
     series = _ensure_daily_index(series)
     if series.empty or len(series) < 7:
         return predict_moving_average(series, horizon_jours=horizon_jours)
 
-    order = [("holt_winters", predict_holt_winters), ("regression", predict_regression), ("sarima", predict_sarima)]
+    order = [
+        ("holt_winters", predict_holt_winters),
+        ("regression", predict_regression),
+        ("boosting", predict_boosting),
+        ("sarima", predict_sarima),
+    ]
     if prefer == "regression":
-        order = [("regression", predict_regression), ("holt_winters", predict_holt_winters), ("sarima", predict_sarima)]
+        order = [
+            ("regression", predict_regression),
+            ("holt_winters", predict_holt_winters),
+            ("boosting", predict_boosting),
+            ("sarima", predict_sarima),
+        ]
+    elif prefer == "boosting":
+        order = [
+            ("boosting", predict_boosting),
+            ("regression", predict_regression),
+            ("holt_winters", predict_holt_winters),
+            ("sarima", predict_sarima),
+        ]
     elif prefer == "sarima":
-        order = [("sarima", predict_sarima), ("holt_winters", predict_holt_winters), ("regression", predict_regression)]
+        order = [
+            ("sarima", predict_sarima),
+            ("holt_winters", predict_holt_winters),
+            ("regression", predict_regression),
+            ("boosting", predict_boosting),
+        ]
 
     for name, fn in order:
-        if name == "sarima":
-            result = fn(series, horizon_jours=horizon_jours)
-        else:
-            result = fn(series, horizon_jours=horizon_jours)
-        if result is not None and len(result) == horizon_jours:
-            return result
+        try:
+            if name == "sarima":
+                result = fn(series, horizon_jours=horizon_jours)
+            else:
+                result = fn(series, horizon_jours=horizon_jours)
+        except Exception:
+            result = None
+        if result is not None and not (hasattr(result, "empty") and result.empty) and len(result) >= horizon_jours:
+            return result.head(horizon_jours) if hasattr(result, "head") else result
 
     return predict_moving_average(series, horizon_jours=horizon_jours)
 
@@ -452,36 +530,40 @@ def predict_admissions_best(
 def predict_occupation_direct(
     occupation_df: pd.DataFrame,
     horizon_jours: int = 14,
+    prefer: str = "auto",
 ) -> pd.DataFrame:
     """
     Prévision directe du nombre de lits occupés (Holt-Winters ou régression, puis MA).
+    prefer : "auto" (essayer HW puis Ridge puis MA), "holt_winters" (HW uniquement), "regression" (Ridge uniquement).
     """
     occ = prepare_series(occupation_df, "occupation_lits")
     occ = _ensure_daily_index(occ)
     if occ.empty:
         return pd.DataFrame()
 
-    result = predict_holt_winters(occ, horizon_jours=horizon_jours)
-    if result is not None and len(result) == horizon_jours:
-        result = result.rename(columns={
-            "prediction": "occupation_lits_pred",
-            "prediction_low": "occupation_lits_low",
-            "prediction_high": "occupation_lits_high",
-        })
-        result["admissions_pred"] = np.nan  # non utilisé en mode direct
-        return result[["date", "occupation_lits_pred", "occupation_lits_low", "occupation_lits_high", "admissions_pred"]]
+    if prefer != "regression":
+        result = predict_holt_winters(occ, horizon_jours=horizon_jours)
+        if result is not None and len(result) == horizon_jours:
+            result = result.rename(columns={
+                "prediction": "occupation_lits_pred",
+                "prediction_low": "occupation_lits_low",
+                "prediction_high": "occupation_lits_high",
+            })
+            result["admissions_pred"] = np.nan  # non utilisé en mode direct
+            return result[["date", "occupation_lits_pred", "occupation_lits_low", "occupation_lits_high", "admissions_pred"]]
 
-    result = predict_regression(occ, horizon_jours=horizon_jours)
-    if result is not None and len(result) == horizon_jours:
-        result = result.rename(columns={
-            "prediction": "occupation_lits_pred",
-            "prediction_low": "occupation_lits_low",
-            "prediction_high": "occupation_lits_high",
-        })
-        result["admissions_pred"] = np.nan
-        return result[["date", "occupation_lits_pred", "occupation_lits_low", "occupation_lits_high", "admissions_pred"]]
+    if prefer != "holt_winters":
+        result = predict_regression(occ, horizon_jours=horizon_jours)
+        if result is not None and len(result) == horizon_jours:
+            result = result.rename(columns={
+                "prediction": "occupation_lits_pred",
+                "prediction_low": "occupation_lits_low",
+                "prediction_high": "occupation_lits_high",
+            })
+            result["admissions_pred"] = np.nan
+            return result[["date", "occupation_lits_pred", "occupation_lits_low", "occupation_lits_high", "admissions_pred"]]
 
-    # Fallback : moyenne récente + tendance
+    # Fallback : moyenne récente + tendance (toujours en direct)
     window = 28
     last = occ.iloc[-window:].mean()
     trend = (occ.iloc[-7:].mean() - occ.iloc[-window:-7].mean()) / 7 if len(occ) >= window and window > 7 else 0
@@ -520,20 +602,31 @@ def predict_occupation_from_admissions(
     duree_sejour_moy: float = 6.0,
     use_best_admissions: bool = True,
     duree_sejour_saisonniere: bool = True,
+    pred_admissions_df: Optional[pd.DataFrame] = None,
+    pred_adm: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Prévision du taux d'occupation à partir des admissions prédites (modèle stock).
-    Si duree_sejour_saisonniere=True (réf. Lequertier), la durée de séjour varie selon le mois.
+    Si pred_admissions_df (ou pred_adm) est fourni, il est utilisé tel quel (colonnes date, prediction, prediction_low, prediction_high).
+    Sinon : use_best_admissions=True appelle predict_admissions_best, False appelle MA.
     """
+    # Alias pour compatibilité (certains appels utilisent pred_adm)
+    if pred_admissions_df is None and pred_adm is not None:
+        pred_admissions_df = pred_adm
     occ = prepare_series(occupation_df, "occupation_lits")
     adm = prepare_series(occupation_df, "admissions_jour")
     occ = _ensure_daily_index(occ)
     adm = _ensure_daily_index(adm)
 
-    if use_best_admissions:
-        pred_adm = predict_admissions_best(adm, horizon_jours=horizon_jours)
+    if pred_admissions_df is not None and len(pred_admissions_df) >= horizon_jours:
+        pred_adm = pred_admissions_df.head(horizon_jours).copy()
+        if "prediction" not in pred_adm.columns:
+            pred_adm = pred_adm.rename(columns={pred_adm.columns[1]: "prediction"}) if len(pred_adm.columns) > 1 else pred_adm
     else:
-        pred_adm = predict_moving_average(adm, horizon_jours=horizon_jours)
+        if use_best_admissions:
+            pred_adm = predict_admissions_best(adm, horizon_jours=horizon_jours)
+        else:
+            pred_adm = predict_moving_average(adm, horizon_jours=horizon_jours)
 
     occ_mean = occ.iloc[-28:].mean() if len(occ) >= 28 else occ.mean()
     adm_mean = adm.iloc[-28:].mean() if len(adm) >= 28 else adm.mean()
@@ -541,7 +634,7 @@ def predict_occupation_from_admissions(
 
     pred = []
     for _, row in pred_adm.iterrows():
-        adm_val = row["prediction"]
+        adm_val = row.get("prediction", 0)
         d = row["date"]
         month = d.month if hasattr(d, "month") else pd.Timestamp(d).month
         duree = _duree_sejour_saisonniere(month, duree_sejour_moy) if duree_sejour_saisonniere else duree_sejour_moy
@@ -587,6 +680,59 @@ def predict_occupation_best(
     return from_adm
 
 
+def build_besoins_from_occupation_pred(pred_df: pd.DataFrame, capacite_lits: int = 1800) -> Dict[str, Any]:
+    """À partir d'un DataFrame de prévisions (occupation_lits_pred, low, high), ajoute taux, alerte, et retourne le dict besoins (public, pour le dashboard)."""
+    return _besoins_from_pred_df(pred_df, capacite_lits)
+
+
+def _besoins_from_pred_df(pred_df: pd.DataFrame, capacite_lits: int) -> Dict[str, Any]:
+    """À partir d'un DataFrame de prévisions (occupation_lits_pred, low, high), ajoute taux, alerte, et retourne le dict besoins."""
+    if pred_df.empty:
+        return {
+            "previsions": pred_df,
+            "taux_max_prevu": 0.0,
+            "taux_max_high": 0.0,
+            "recommandation": "Données insuffisantes.",
+            "seuils": {"alerte": 0.85, "critique": 0.95},
+        }
+    if "taux_occupation_pred" not in pred_df.columns:
+        pred_df = pred_df.copy()
+        pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / capacite_lits
+        if "occupation_lits_low" in pred_df.columns:
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / capacite_lits
+        else:
+            pred_df["taux_occupation_low"] = pred_df["taux_occupation_pred"] * 0.95
+        if "occupation_lits_high" in pred_df.columns:
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / capacite_lits
+        else:
+            pred_df["taux_occupation_high"] = pred_df["taux_occupation_pred"] * 1.05
+    seuil_alerte, seuil_critique = 0.85, 0.95
+    pred_df = pred_df.copy()
+    pred_df["alerte"] = "normal"
+    pred_df.loc[pred_df["taux_occupation_pred"] >= seuil_critique, "alerte"] = "critique"
+    pred_df.loc[
+        (pred_df["taux_occupation_pred"] >= seuil_alerte) & (pred_df["taux_occupation_pred"] < seuil_critique),
+        "alerte",
+    ] = "alerte"
+    max_occ = float(pred_df["taux_occupation_pred"].max())
+    max_high = float(pred_df["taux_occupation_high"].max()) if "taux_occupation_high" in pred_df.columns else max_occ
+    if max_occ >= seuil_critique:
+        reco = "Renforcer les effectifs et reporter les interventions non urgentes."
+    elif max_occ >= seuil_alerte:
+        reco = "Surveiller les effectifs et préparer une montée en charge."
+    elif max_high >= seuil_alerte:
+        reco = "Vigilance : la borne haute des prévisions approche le seuil d'alerte."
+    else:
+        reco = "Capacité dans la norme ; maintenir la vigilance."
+    return {
+        "previsions": pred_df,
+        "taux_max_prevu": max_occ,
+        "taux_max_high": max_high,
+        "recommandation": reco,
+        "seuils": {"alerte": seuil_alerte, "critique": seuil_critique},
+    }
+
+
 def predict_besoins(
     occupation_df: pd.DataFrame,
     capacite_lits: int = 1800,
@@ -605,34 +751,69 @@ def predict_besoins(
         pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / capacite_lits
         pred_df["taux_occupation_low"] = pred_df["taux_occupation_pred"] * 0.95
         pred_df["taux_occupation_high"] = pred_df["taux_occupation_pred"] * 1.05
+    return _besoins_from_pred_df(pred_df, capacite_lits)
 
-    seuil_alerte = 0.85
-    seuil_critique = 0.95
-    pred_df["alerte"] = "normal"
-    pred_df.loc[pred_df["taux_occupation_pred"] >= seuil_critique, "alerte"] = "critique"
-    pred_df.loc[
-        (pred_df["taux_occupation_pred"] >= seuil_alerte) & (pred_df["taux_occupation_pred"] < seuil_critique),
-        "alerte",
-    ] = "alerte"
 
-    max_occ = pred_df["taux_occupation_pred"].max()
-    max_high = pred_df["taux_occupation_high"].max() if "taux_occupation_high" in pred_df.columns else max_occ
-    if max_occ >= seuil_critique:
-        reco = "Renforcer les effectifs et reporter les interventions non urgentes."
-    elif max_occ >= seuil_alerte:
-        reco = "Surveiller les effectifs et préparer une montée en charge."
-    elif max_high >= seuil_alerte:
-        reco = "Vigilance : la borne haute des prévisions approche le seuil d'alerte."
-    else:
-        reco = "Capacité dans la norme ; maintenir la vigilance."
+def predict_besoins_with_model(
+    occupation_df: pd.DataFrame,
+    model_choice: str,
+    capacite_lits: int = 1800,
+    horizon_jours: int = 14,
+    duree_sejour_moy: float = 6.0,
+) -> Dict[str, Any]:
+    """
+    Prévision des besoins en forçant un modèle donné (pour comparaison et démo).
+    model_choice : "auto" | "holt_winters" | "ridge" | "sarima" | "ma" | "boosting" | "direct_hw" | "direct_ridge"
+    """
+    occ = prepare_series(occupation_df, "occupation_lits")
+    adm = prepare_series(occupation_df, "admissions_jour")
+    occ = _ensure_daily_index(occ)
+    adm = _ensure_daily_index(adm)
 
-    return {
-        "previsions": pred_df,
-        "taux_max_prevu": float(max_occ),
-        "taux_max_high": float(max_high),
-        "recommandation": reco,
-        "seuils": {"alerte": seuil_alerte, "critique": seuil_critique},
-    }
+    if model_choice == "auto":
+        return predict_besoins(
+            occupation_df, capacite_lits=capacite_lits, horizon_jours=horizon_jours, duree_sejour_moy=duree_sejour_moy
+        )
+
+    if model_choice == "direct_hw":
+        pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon_jours, prefer="holt_winters")
+        if not pred_df.empty:
+            pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / capacite_lits
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / capacite_lits
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / capacite_lits
+        return _besoins_from_pred_df(pred_df, capacite_lits)
+
+    if model_choice == "direct_ridge":
+        pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon_jours, prefer="regression")
+        if not pred_df.empty:
+            pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / capacite_lits
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / capacite_lits
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / capacite_lits
+        return _besoins_from_pred_df(pred_df, capacite_lits)
+
+    pred_adm = None
+    if model_choice == "holt_winters":
+        pred_adm = predict_holt_winters(adm, horizon_jours=horizon_jours)
+    elif model_choice == "ridge":
+        pred_adm = predict_regression(adm, horizon_jours=horizon_jours)
+    elif model_choice == "sarima":
+        pred_adm = predict_sarima(adm, horizon_jours=horizon_jours)
+    elif model_choice == "ma":
+        pred_adm = predict_moving_average(adm, horizon_jours=horizon_jours)
+    elif model_choice == "boosting":
+        pred_adm = predict_boosting(adm, horizon_jours=horizon_jours)
+
+    if pred_adm is None or pred_adm.empty or len(pred_adm) < horizon_jours:
+        return predict_besoins(
+            occupation_df, capacite_lits=capacite_lits, horizon_jours=horizon_jours, duree_sejour_moy=duree_sejour_moy
+        )
+    pred_df = predict_occupation_from_admissions(
+        occupation_df,
+        horizon_jours=horizon_jours,
+        duree_sejour_moy=duree_sejour_moy,
+        pred_admissions_df=pred_adm,
+    )
+    return _besoins_from_pred_df(pred_df, capacite_lits)
 
 
 # --- Métrique de validation ±10 % (réf. Bouteloup 2020) ---
@@ -670,6 +851,76 @@ def evaluate_forecast_pct_within_10(
         "n_days": horizon,
         "pct_surestimation": float((pred > actual * 1.10).mean()),
         "pct_sous_estimation": float((pred < actual * 0.90).mean()),
+    }
+
+
+def run_backtest_admissions(
+    series: pd.Series,
+    validation_days: int = 90,
+    use_best: bool = True,
+) -> Dict[str, Any]:
+    """
+    Backtest : entraîne sur le passé, prédit la période de validation, retourne
+    un DataFrame prévision vs réel et les métriques (MAE, RMSE, % ±10 %, biais).
+    """
+    series = _ensure_daily_index(series)
+    if len(series) < validation_days + 60:
+        return {
+            "backtest_df": pd.DataFrame(),
+            "metrics": None,
+            "message": "Série trop courte (il faut au moins 60 jours avant la période de test).",
+        }
+    train_end = len(series) - validation_days
+    train = series.iloc[:train_end]
+    test = series.iloc[train_end:]
+    horizon = len(test)
+
+    if use_best:
+        pred_df = predict_admissions_best(train, horizon_jours=horizon)
+    else:
+        pred_df = predict_moving_average(train, horizon_jours=horizon)
+
+    if pred_df is None or pred_df.empty or len(pred_df) < horizon:
+        return {
+            "backtest_df": pd.DataFrame(),
+            "metrics": None,
+            "message": "Échec de la prédiction pour le backtest.",
+        }
+
+    actual = test.values[:horizon]
+    pred = pred_df["prediction"].values[:horizon]
+    dates = pred_df["date"].values[:horizon]
+    dates = pd.to_datetime(dates)
+
+    backtest_df = pd.DataFrame({
+        "date": dates,
+        "observé": actual,
+        "prévu": pred,
+    })
+    if "prediction_low" in pred_df.columns and "prediction_high" in pred_df.columns:
+        backtest_df["prévu_basse"] = pred_df["prediction_low"].values[:horizon]
+        backtest_df["prévu_haute"] = pred_df["prediction_high"].values[:horizon]
+
+    rel_err = np.where(actual > 0, np.abs(pred - actual) / np.maximum(actual, 1e-6), 0)
+    within_10 = float((rel_err <= 0.10).mean())
+    mean_error = float(np.mean(pred - actual))
+    mae = float(np.mean(np.abs(pred - actual)))
+    rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
+
+    metrics = {
+        "pct_within_10": within_10,
+        "mean_error": mean_error,
+        "mae": mae,
+        "rmse": rmse,
+        "n_days": horizon,
+        "pct_surestimation": float((pred > actual * 1.10).mean()),
+        "pct_sous_estimation": float((pred < actual * 0.90).mean()),
+    }
+
+    return {
+        "backtest_df": backtest_df,
+        "metrics": metrics,
+        "message": None,
     }
 
 

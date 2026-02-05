@@ -1,0 +1,15 @@
+# Thème du tableau de bord — Pitié-Salpêtrière
+# https://docs.streamlit.io/library/advanced-features/theming
+
+[theme]
+primaryColor = "#0066a0"
+backgroundColor = "#f8fafc"
+secondaryBackgroundColor = "#e8f4fc"
+textColor = "#1e293b"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

@@ -5,7 +5,14 @@ Lancer : streamlit run app/dashboard.py (depuis la racine du projet)
 """
 
 import sys
+import warnings
 from pathlib import Path
+
+# Éviter que les messages de dépréciation (Streamlit, pandas, plotly) s'affichent au-dessus des graphiques
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*use_container_width.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*keyword arguments have been deprecated.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Use config instead.*", category=UserWarning)
 
 # Racine du projet
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,11 +27,58 @@ import plotly.graph_objects as go
 from src.data.load import load_admissions, load_occupation
 from src.prediction.models import (
     predict_besoins,
+    predict_holt_winters,
+    predict_regression,
+    predict_sarima,
+    predict_moving_average,
+    predict_occupation_direct,
+    predict_occupation_from_admissions,
     evaluate_forecast_pct_within_10,
     evaluate_boosting_model,
     predict_boosting,
     prepare_series,
+    run_backtest_admissions,
 )
+
+
+def _build_besoins_from_pred_df(pred_df: pd.DataFrame, capacite_lits: int = 1800) -> dict:
+    """Construit le dict besoins (taux, alerte, reco) à partir d'un DataFrame de prévisions occupation."""
+    if pred_df.empty:
+        return {
+            "previsions": pred_df,
+            "taux_max_prevu": 0.0,
+            "taux_max_high": 0.0,
+            "recommandation": "Données insuffisantes.",
+            "seuils": {"alerte": 0.85, "critique": 0.95},
+        }
+    p = pred_df.copy()
+    if "taux_occupation_pred" not in p.columns:
+        p["taux_occupation_pred"] = p["occupation_lits_pred"] / capacite_lits
+        p["taux_occupation_low"] = p.get("occupation_lits_low", p["occupation_lits_pred"]) / capacite_lits
+        p["taux_occupation_high"] = p.get("occupation_lits_high", p["occupation_lits_pred"]) / capacite_lits
+    seuil_alerte, seuil_critique = 0.85, 0.95
+    p["alerte"] = "normal"
+    p.loc[p["taux_occupation_pred"] >= seuil_critique, "alerte"] = "critique"
+    p.loc[(p["taux_occupation_pred"] >= seuil_alerte) & (p["taux_occupation_pred"] < seuil_critique), "alerte"] = "alerte"
+    max_occ = float(p["taux_occupation_pred"].max())
+    max_high = float(p["taux_occupation_high"].max()) if "taux_occupation_high" in p.columns else max_occ
+    if max_occ >= seuil_critique:
+        reco = "Renforcer les effectifs et reporter les interventions non urgentes."
+    elif max_occ >= seuil_alerte:
+        reco = "Surveiller les effectifs et préparer une montée en charge."
+    elif max_high >= seuil_alerte:
+        reco = "Vigilance : la borne haute des prévisions approche le seuil d'alerte."
+    else:
+        reco = "Capacité dans la norme ; maintenir la vigilance."
+    return {
+        "previsions": p,
+        "taux_max_prevu": max_occ,
+        "taux_max_high": max_high,
+        "recommandation": reco,
+        "seuils": {"alerte": seuil_alerte, "critique": seuil_critique},
+    }
+
+
 from src.simulation.scenarios import run_scenario, SCENARIOS
 from src.recommendations.engine import (
     recommendations_from_forecast,
@@ -34,12 +88,69 @@ from src.recommendations.engine import (
 
 st.set_page_config(
     page_title="MVP Pitié-Salpêtrière — Prévision des besoins",
-    page_icon="🏥",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🏥 MVP Pitié-Salpêtrière")
-st.caption("Simulation et prévision des besoins hospitaliers — Données fictives")
+# Chemins possibles pour le logo (sidebar et header)
+APP_DIR = Path(__file__).resolve().parent
+ASSETS = APP_DIR / "assets"
+LOGO_PNG = ASSETS / "logo_salpetriere.png"
+LOGO_SVG = ASSETS / "logo_salpetriere.svg"
+BATIMENT_PNG = ASSETS / "batiment_salpetriere.png"
+
+# CSS pour améliorer l'esthétique
+st.markdown("""
+<style>
+    /* En-tête principal */
+    .main-header {
+        padding: 0.75rem 0 1.25rem 0;
+        border-bottom: 2px solid #0066a0;
+        margin-bottom: 1.5rem;
+    }
+    .main-header h1 {
+        font-size: 1.75rem !important;
+        font-weight: 600 !important;
+        color: #0066a0 !important;
+        margin-bottom: 0.25rem !important;
+    }
+    .main-header .caption {
+        color: #64748b;
+        font-size: 0.95rem;
+    }
+    /* Sidebar : espace autour du logo */
+    [data-testid="stSidebar"] .logo-container {
+        text-align: center;
+        padding: 0.5rem 0 1rem 0;
+        margin-bottom: 0.5rem;
+        border-bottom: 1px solid rgba(0,102,160,0.2);
+    }
+    [data-testid="stSidebar"] .logo-container img {
+        max-width: 180px;
+        height: auto;
+    }
+    [data-testid="stSidebar"] .logo-placeholder {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: #0066a0;
+        line-height: 1.3;
+    }
+    /* Sections : espacement */
+    .stHeader { padding-top: 0.5rem; }
+    div[data-testid="stVerticalBlock"] > div { padding: 0.1rem 0; }
+    /* Métriques / indicateurs */
+    [data-testid="stMetricValue"] { font-size: 1.25rem !important; }
+    /* Bannière bâtiment */
+    .banner-batiment {
+        width: 100%;
+        max-height: 200px;
+        object-fit: cover;
+        border-radius: 8px;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+</style>
+""", unsafe_allow_html=True)
 
 try:
     admissions_df = load_admissions(ROOT / "data")
@@ -54,7 +165,18 @@ except FileNotFoundError as e:
 date_min_data = occupation_df["date"].min().date() if hasattr(occupation_df["date"].min(), "date") else pd.Timestamp(occupation_df["date"].min()).date()
 date_max_data = occupation_df["date"].max().date() if hasattr(occupation_df["date"].max(), "date") else pd.Timestamp(occupation_df["date"].max()).date()
 
-# Sidebar
+# Sidebar — logo ou intitulé
+if LOGO_PNG.exists():
+    st.sidebar.image(str(LOGO_PNG), use_container_width=True)
+elif LOGO_SVG.exists():
+    with open(LOGO_SVG, encoding="utf-8") as f:
+        st.sidebar.markdown(f.read(), unsafe_allow_html=True)
+else:
+    st.sidebar.markdown(
+        "<div class='logo-placeholder'>Hôpital<br>Pitié-Salpêtrière</div>",
+        unsafe_allow_html=True,
+    )
+st.sidebar.markdown("---")
 st.sidebar.header("Navigation")
 section = st.sidebar.radio(
     "Section",
@@ -65,7 +187,32 @@ section = st.sidebar.radio(
         "Modèle Boosting (apprentissage)",
         "Recommandations",
     ],
+    label_visibility="collapsed",
 )
+
+# En-tête principal (avec ou sans logo)
+header_logo_html = ""
+if LOGO_PNG.exists():
+    import base64
+    with open(LOGO_PNG, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode()
+    header_logo_html = f'<img src="data:image/png;base64,{b64}" alt="Logo" style="max-height:48px; margin-right:12px; vertical-align:middle;" /> '
+st.markdown(
+    f"""
+    <div class="main-header">
+        <span style="display:inline-flex; align-items:center; flex-wrap:wrap;">
+            {header_logo_html}
+            <h1 style="margin:0;">MVP Pitié-Salpêtrière</h1>
+        </span>
+        <p class="caption">Simulation et prévision des besoins hospitaliers — Données fictives</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Bannière : photo du bâtiment Pitié-Salpêtrière (si disponible)
+if BATIMENT_PNG.exists():
+    st.image(str(BATIMENT_PNG), use_container_width=True, output_format="PNG")
 
 # --- Flux & historique ---
 if section == "Flux & historique":
@@ -219,10 +366,78 @@ if section == "Flux & historique":
     fig_pie = px.pie(part, values="admissions", names="service", title=f"Répartition du {date_debut_hist.strftime('%d/%m/%Y')} au {date_fin_hist.strftime('%d/%m/%Y')}")
     st.plotly_chart(fig_pie, use_container_width=True)
 
+    st.subheader("Répartition calendaire (heatmap)")
+    st.caption("Moyenne des admissions (ou du taux d'occupation) par **jour de la semaine** et **mois**, sur la période filtrée.")
+    jours_sem = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+    mois_noms = ["Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Août", "Sep", "Oct", "Nov", "Déc"]
+    col_hm1, col_hm2 = st.columns(2)
+    with col_hm1:
+        if not adm_filtree.empty:
+            adm_daily = adm_filtree.groupby("date")["admissions"].sum().reset_index()
+            adm_daily["date"] = pd.to_datetime(adm_daily["date"])
+            adm_daily["mois"] = adm_daily["date"].dt.month
+            adm_daily["jour_semaine"] = adm_daily["date"].dt.dayofweek
+            adm_agg_cal = adm_daily.groupby(["mois", "jour_semaine"])["admissions"].mean().reset_index()
+            pivot_adm = adm_agg_cal.pivot(index="mois", columns="jour_semaine", values="admissions")
+            pivot_adm = pivot_adm.reindex(index=range(1, 13), columns=range(7)).fillna(0)
+            z_adm = pivot_adm.values
+            fig_hm_adm = go.Figure(
+                data=go.Heatmap(
+                    x=jours_sem,
+                    y=mois_noms,
+                    z=z_adm,
+                    colorscale="Blues",
+                    colorbar=dict(title="Admissions (moy.)"),
+                )
+            )
+            fig_hm_adm.update_layout(
+                title="Admissions (moyenne par jour de semaine × mois)",
+                xaxis_title="Jour de la semaine",
+                yaxis_title="Mois",
+                height=400,
+            )
+            st.plotly_chart(fig_hm_adm, use_container_width=True)
+        else:
+            st.info("Aucune donnée pour la heatmap admissions.")
+    with col_hm2:
+        if not occ_filtree.empty:
+            occ_cal = occ_filtree.copy()
+            occ_cal["date"] = pd.to_datetime(occ_cal["date"])
+            occ_cal["mois"] = occ_cal["date"].dt.month
+            occ_cal["jour_semaine"] = occ_cal["date"].dt.dayofweek
+            occ_agg_cal = occ_cal.groupby(["mois", "jour_semaine"])["taux_occupation"].mean().reset_index()
+            pivot_occ = occ_agg_cal.pivot(index="mois", columns="jour_semaine", values="taux_occupation")
+            pivot_occ = pivot_occ.reindex(index=range(1, 13), columns=range(7)).fillna(0)
+            z_occ = pivot_occ.values * 100
+            fig_hm_occ = go.Figure(
+                data=go.Heatmap(
+                    x=jours_sem,
+                    y=mois_noms,
+                    z=z_occ,
+                    colorscale="Reds",
+                    colorbar=dict(title="Taux (%)"),
+                )
+            )
+            fig_hm_occ.update_layout(
+                title="Taux d'occupation (moyenne par jour × mois)",
+                xaxis_title="Jour de la semaine",
+                yaxis_title="Mois",
+                height=400,
+            )
+            st.plotly_chart(fig_hm_occ, use_container_width=True)
+        else:
+            st.info("Aucune donnée pour la heatmap occupation.")
+
 # --- Prévisions ---
 elif section == "Prévisions":
     st.header("Prévisions des besoins")
-    st.caption("Modèles : Holt-Winters (saisonnalité 7j), régression (lags 1–7–14 + mean j-7 à j-13, jours fériés, vacances, température synth. — réf. Bouteloup), durée de séjour saisonnière (réf. Lequertier) ; IC 95 %.")
+    st.caption("Modèles : Holt-Winters (saisonnalité 7j), régression Ridge avec **splines** (jour_semaine, jour_du_mois, température — approximation GAM, réf. Bouteloup), lags 1–7–14 + calendrier, durée de séjour saisonnière (Lequertier) ; IC 95 %. Veille thèses : docs/04-litterature/VEILLE-THESES-DOCTORATS.md")
+    st.info(
+        "**D’où viennent les « vagues » ?** La prévision repose beaucoup sur la **saisonnalité hebdomadaire** (jour de la semaine) : "
+        "le même jour se répète toutes les 7 jours, donc les pics apparaissent à des dates qui enchaînent (ex. 5, 12, 19, 26 du mois) — "
+        "ce n’est pas un pic « mi-mois » au sens métier. Un effet **fin de mois** est maintenant pris en compte via les variables *jour du mois* et *fin de mois* dans la régression ; "
+        "sur données réelles, le modèle pourra apprendre un surcroît d’activité en fin de mois si les données le montrent."
+    )
 
     # Période de prévisions : date de début (fixe) + date de fin ou nombre de jours
     last_date = occupation_df["date"].max()
@@ -260,8 +475,92 @@ elif section == "Prévisions":
 
     st.caption(f"Prévisions du **{start_prevision_date.strftime('%d/%m/%Y')}** au **{date_fin_prevision.strftime('%d/%m/%Y')}** ({horizon} jours)")
 
-    besoins = predict_besoins(occupation_df, horizon_jours=horizon)
+    st.subheader("Choix du modèle (pour démo et comparaison)")
+    with st.expander("Comprendre les données et les modèles"):
+        st.markdown(
+            "**Données** : le jeu est **synthétique** (généré par `src.data.generate`), avec des tendances réalistes mais lisses. "
+            "Il n’y a pas de données réelles de patients.\n\n"
+            "**Modèles** : chaque option force un algorithme précis. **Via admissions** = on prévoit d’abord les entrées quotidiennes, "
+            "puis on en déduit l’occupation des lits (formule de stock). **Occupation directe** = on prévoit directement le nombre de lits occupés. "
+            "Sur des données synthétiques lisses, **Holt-Winters** et **Ridge** peuvent donner des courbes proches ; "
+            "la **moyenne glissante** est en général plus plate (moins de vagues)."
+        )
+    with st.expander("À propos des % affichés (taux d'occupation, % à ±10 %)"):
+        st.markdown(
+            "**Taux d'occupation** (ex. 67 %, 82 %) = nombre de lits occupés prévus / 1800. "
+            "Il est souvent « élevé » car les données synthétiques sont calibrées pour un hôpital chargé (niveau réaliste) et les modèles reproduisent cette dynamique.\n\n"
+            "**% à ±10 %** (Bouteloup) = proportion de jours où l'erreur relative de prévision est ≤ 10 %. "
+            "Sur données synthétiques lisses, ce % est souvent élevé (85–95 %) car les séries sont faciles à prévoir ; sur données réelles, 70–80 % serait déjà bon.\n\n"
+            "**85 % et 95 %** = seuils d'alerte et critique (constantes), pas une sortie des modèles. "
+            "Détail : **docs/03-modeles-et-resultats/EXPLICATION-POURCENTAGES.md**"
+        )
+    MODELES_PREVISION = [
+        ("Auto (meilleur disponible)", "auto"),
+        ("Holt-Winters (admissions puis occupation)", "holt_winters"),
+        ("Régression Ridge (admissions puis occupation)", "ridge"),
+        ("SARIMA (admissions puis occupation)", "sarima"),
+        ("Moyenne glissante (admissions puis occupation)", "ma"),
+        ("Boosting XGBoost/GBM (admissions puis occupation)", "boosting"),
+        ("Occupation directe (Holt-Winters sur les lits)", "direct_hw"),
+        ("Occupation directe (Régression sur les lits)", "direct_ridge"),
+    ]
+    modele_choisi_label = st.selectbox(
+        "Modèle de prédiction",
+        options=[m[0] for m in MODELES_PREVISION],
+        index=0,
+        key="choix_modele_prevision",
+        help="Permet de visualiser les prévisions par modèle pour la démo et de comparer les sorties.",
+    )
+    modele_choisi = next(m[1] for m in MODELES_PREVISION if m[0] == modele_choisi_label)
+    CAPACITE = 1800
+
+    # Calcul des prévisions selon le modèle choisi (logique explicite pour que la courbe change bien)
+    if modele_choisi == "auto":
+        besoins = predict_besoins(occupation_df, horizon_jours=horizon, capacite_lits=CAPACITE)
+    elif modele_choisi == "direct_hw":
+        pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon, prefer="holt_winters")
+        if not pred_df.empty:
+            pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / CAPACITE
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / CAPACITE
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / CAPACITE
+        besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
+    elif modele_choisi == "direct_ridge":
+        pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon, prefer="regression")
+        if not pred_df.empty:
+            pred_df["taux_occupation_pred"] = pred_df["occupation_lits_pred"] / CAPACITE
+            pred_df["taux_occupation_low"] = pred_df["occupation_lits_low"] / CAPACITE
+            pred_df["taux_occupation_high"] = pred_df["occupation_lits_high"] / CAPACITE
+        besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
+    else:
+        # Via admissions : on prédit les admissions avec le modèle choisi, puis on déduit l'occupation
+        adm_series = prepare_series(occupation_df, "admissions_jour")
+        pred_adm = None
+        if modele_choisi == "holt_winters":
+            pred_adm = predict_holt_winters(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "ridge":
+            pred_adm = predict_regression(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "sarima":
+            pred_adm = predict_sarima(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "ma":
+            pred_adm = predict_moving_average(adm_series, horizon_jours=horizon)
+        elif modele_choisi == "boosting":
+            pred_adm = predict_boosting(adm_series, horizon_jours=horizon)
+        if pred_adm is not None and not pred_adm.empty and len(pred_adm) >= horizon:
+            pred_df = predict_occupation_from_admissions(
+                occupation_df,
+                horizon_jours=horizon,
+                duree_sejour_moy=6.0,
+                use_best_admissions=False,
+                duree_sejour_saisonniere=True,
+                pred_adm=pred_adm,
+            )
+            besoins = _build_besoins_from_pred_df(pred_df, CAPACITE)
+        else:
+            besoins = predict_besoins(occupation_df, horizon_jours=horizon, capacite_lits=CAPACITE)
+            st.caption("Modèle demandé non disponible (série trop courte ou erreur) ; affichage Auto.")
+
     pred_df = besoins["previsions"]
+    st.caption(f"Modèle affiché : **{modele_choisi_label}**.")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -270,7 +569,7 @@ elif section == "Prévisions":
             st.caption(f"Borne haute (IC 95 %) : {besoins['taux_max_high']:.0%}")
         st.info(besoins["recommandation"])
     with col2:
-        st.subheader("Prévision occupation (lits)")
+        st.subheader(f"Prévision occupation (lits) — {modele_choisi_label}")
         fig_pred = go.Figure()
         fig_pred.add_trace(
             go.Scatter(
@@ -295,9 +594,10 @@ elif section == "Prévisions":
             )
         fig_pred.add_hline(y=1800 * 0.85, line_dash="dash", line_color="orange")
         fig_pred.add_hline(y=1800 * 0.95, line_dash="dash", line_color="red")
-        fig_pred.update_layout(height=350, title="Prévision occupation des lits")
+        fig_pred.update_layout(height=350, title=f"Occupation prévue — {modele_choisi_label}")
         fig_pred.update_xaxes(tickformat="%d/%m/%Y")
         st.plotly_chart(fig_pred, use_container_width=True)
+        st.caption("Saisonnalité hebdo (jour de la semaine) + effet possible fin de mois. Les pics répétés = même jour de la semaine, pas une logique calendaire « mi-mois ».")
 
     cols_table = ["date", "occupation_lits_pred", "admissions_pred", "taux_occupation_pred", "alerte"]
     if "occupation_lits_low" in pred_df.columns:
@@ -306,7 +606,14 @@ elif section == "Prévisions":
     st.subheader("Détail des prévisions")
     pred_display = pred_df[[c for c in cols_table if c in pred_df.columns]].head(horizon).copy()
     pred_display["date"] = pd.to_datetime(pred_display["date"]).dt.strftime("%d/%m/%Y")
-    st.dataframe(pred_display, use_container_width=True)
+    if "admissions_pred" in pred_display.columns and pred_display["admissions_pred"].isna().all():
+        pred_display["admissions_pred"] = "—"
+        st.caption("**Admissions prédites (—)** : en mode *prédiction directe* (occupation des lits sans passer par les admissions), les admissions ne sont pas estimées par le modèle.")
+    elif "admissions_pred" in pred_display.columns:
+        pred_display["admissions_pred"] = pred_display["admissions_pred"].apply(
+            lambda x: round(x, 1) if pd.notna(x) else "—"
+        )
+    st.dataframe(pred_display, width="stretch")
 
     with st.expander("Validation du modèle (réf. Bouteloup : critère ±10 %)"):
         adm_series = occupation_df.set_index("date")["admissions_jour"]
@@ -319,8 +626,85 @@ elif section == "Prévisions":
         else:
             st.caption(eval_res.get("message", "Non disponible"))
 
+    st.subheader("Backtest : prévision vs réel")
+    st.caption(
+        "Simulation sur le passé : le modèle est entraîné sur les données avant la période de test, "
+        "puis on compare les prévisions aux valeurs observées (admissions quotidiennes)."
+    )
+    adm_series_bt = occupation_df.set_index("date")["admissions_jour"]
+    backtest_jours = st.slider(
+        "Période de test (jours)",
+        min_value=30,
+        max_value=120,
+        value=90,
+        step=15,
+        key="backtest_days",
+        help="Nombre de jours en fin de série utilisés pour comparer prévision vs observé.",
+    )
+    backtest_res = run_backtest_admissions(adm_series_bt, validation_days=backtest_jours, use_best=True)
+    if backtest_res.get("message"):
+        st.warning(backtest_res["message"])
+    else:
+        bt_df = backtest_res["backtest_df"]
+        metrics = backtest_res["metrics"]
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("MAE (admissions/jour)", f"{metrics['mae']:.1f}")
+        with m2:
+            st.metric("RMSE", f"{metrics['rmse']:.1f}")
+        with m3:
+            st.metric("% à ±10 % (Bouteloup)", f"{metrics['pct_within_10']:.1%}")
+        with m4:
+            st.metric("Biais moyen", f"{metrics['mean_error']:+.1f}")
+        fig_bt = go.Figure()
+        fig_bt.add_trace(
+            go.Scatter(
+                x=bt_df["date"],
+                y=bt_df["observé"],
+                mode="lines",
+                name="Observé",
+                line=dict(color="rgb(0,100,200)", width=2),
+            )
+        )
+        fig_bt.add_trace(
+            go.Scatter(
+                x=bt_df["date"],
+                y=bt_df["prévu"],
+                mode="lines",
+                name="Prévu (backtest)",
+                line=dict(color="rgb(200,80,0)", width=2, dash="dash"),
+            )
+        )
+        if "prévu_basse" in bt_df.columns and "prévu_haute" in bt_df.columns:
+            x = list(bt_df["date"]) + list(bt_df["date"][::-1])
+            y = list(bt_df["prévu_haute"]) + list(bt_df["prévu_basse"][::-1])
+            fig_bt.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=y,
+                    fill="toself",
+                    fillcolor="rgba(200,80,0,0.15)",
+                    line=dict(color="rgba(255,255,255,0)"),
+                    name="IC 95 % prévu",
+                )
+            )
+        fig_bt.update_layout(
+            height=380,
+            title="Backtest : admissions observées vs prévues",
+            xaxis_title="Date",
+            yaxis_title="Admissions / jour",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        fig_bt.update_xaxes(tickformat="%d/%m/%Y")
+        st.plotly_chart(fig_bt, use_container_width=True)
+        with st.expander("Voir les données du backtest"):
+            bt_display = bt_df.copy()
+            bt_display["date"] = pd.to_datetime(bt_display["date"]).dt.strftime("%d/%m/%Y")
+            st.dataframe(bt_display, width="stretch")
+
     st.subheader("Export")
-    pred_export = pred_df[["date", "occupation_lits_pred", "admissions_pred", "taux_occupation_pred", "alerte"]].copy()
+    export_cols = [c for c in ["date", "occupation_lits_pred", "admissions_pred", "taux_occupation_pred", "alerte"] if c in pred_df.columns]
+    pred_export = pred_df[export_cols].copy()
     pred_export["date"] = pd.to_datetime(pred_export["date"]).dt.strftime("%Y-%m-%d")
     csv_bytes = pred_export.to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -399,7 +783,7 @@ elif section == "Modèle Boosting (apprentissage)":
             st.plotly_chart(fig_boost, use_container_width=True)
             st.dataframe(
                 pred_boost.assign(date=pd.to_datetime(pred_boost["date"]).dt.strftime("%d/%m/%Y")),
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.info("Prévision boosting non disponible (vérifier les dépendances : xgboost ou scikit-learn).")
@@ -449,7 +833,7 @@ elif section == "Simulation de scénarios":
             fig.update_layout(height=400)
             fig.update_xaxes(tickformat="%d/%m/%Y")
             st.plotly_chart(fig, use_container_width=True)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
             df_export = df.copy()
             df_export["date"] = pd.to_datetime(df_export["date"]).dt.strftime("%Y-%m-%d")
             st.download_button(
@@ -481,9 +865,11 @@ with st.sidebar.expander("À propos des modèles (M2)"):
     st.caption(
         "**Prédiction** : Holt-Winters (saisonnalité 7j), régression Ridge (lags 1–7–14, mean j-7 à j-13, "
         "jours fériés, vacances, température synth. — réf. Bouteloup), durée de séjour saisonnière (réf. Lequertier). "
-        "**Boosting** : XGBoost ou GradientBoosting (mêmes variables), apprentissage sur le passé, onglet dédié. "
+        "**Boosting** : XGBoost ou GBM (mêmes variables + splines type GAM). **Régression** : splines sur jour/mois/temp. pour effets non linéaires (veille thèses). "
         "Validation : critère ±10 %, biais (surestimation/sous-estimation). "
         "Justification détaillée : voir docs/01-rapport-conception/JUSTIFICATION-MODELES-PREDICTION.md. "
-        "Pistes d’évolution : docs/PISTES-EVOLUTION.md"
+        "Cohérence / complémentarité des modèles : docs/03-modeles-et-resultats/COHERENCE-MODELES-PREVISION.md. "
+        "Explication des % (taux, % à ±10 %) : docs/03-modeles-et-resultats/EXPLICATION-POURCENTAGES.md. "
+        "Pistes d’évolution : docs/05-reference/PISTES-EVOLUTION.md. Vue d'ensemble : docs/VUE-ENSEMBLE-PROJET.md"
     )
 st.sidebar.caption("Projet Data Promo 2026 — Données fictives, pas de données réelles.")
