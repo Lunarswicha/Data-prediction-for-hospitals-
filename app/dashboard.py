@@ -38,6 +38,7 @@ from src.prediction.models import (
     predict_boosting,
     prepare_series,
     run_backtest_admissions,
+    select_best_model_by_backtest,
 )
 
 
@@ -218,13 +219,44 @@ if BATIMENT_PNG.exists():
 if section == "Flux & historique":
     st.header("Flux hospitaliers et historique")
 
-    # Filtres par période (jour / mois / année)
+    # Dernière année civile complète disponible dans les données
+    year_max = date_max_data.year
+    if date_max_data.month >= 12 and date_max_data.day >= 31:
+        last_full_year = year_max
+    else:
+        last_full_year = year_max - 1
+    year_min = date_min_data.year
+    # Bornes des presets (clampées aux données)
+    full_year_start = max(date_min_data, pd.Timestamp(last_full_year, 1, 1).date())
+    full_year_end = min(date_max_data, pd.Timestamp(last_full_year, 12, 31).date())
+    winter_start = max(date_min_data, pd.Timestamp(last_full_year - 1, 12, 1).date())
+    winter_end = min(date_max_data, pd.Timestamp(last_full_year, 2, 28).date())
+    summer_start = max(date_min_data, pd.Timestamp(last_full_year, 6, 1).date())
+    summer_end = min(date_max_data, pd.Timestamp(last_full_year, 8, 31).date())
+
     st.subheader("Filtrer la période")
-    col_f1, col_f2, col_f3 = st.columns(3)
-    with col_f1:
+    preset = st.radio(
+        "Type de période",
+        options=["Année complète (dernière)", "Hiver (déc–fév)", "Été (juin–août)", "Personnalisée"],
+        index=0,
+        key="hist_preset",
+        horizontal=True,
+        help="Vue annuelle pour comparer pics hivernaux et baisse estivale ; hiver/été pour comparer les saisons.",
+    )
+    if preset == "Année complète (dernière)":
+        default_debut, default_fin = full_year_start, full_year_end
+    elif preset == "Hiver (déc–fév)":
+        default_debut, default_fin = winter_start, winter_end
+    elif preset == "Été (juin–août)":
+        default_debut, default_fin = summer_start, summer_end
+    else:
         default_debut = (pd.Timestamp(date_max_data) - pd.DateOffset(months=12)).date()
         if default_debut < date_min_data:
             default_debut = date_min_data
+        default_fin = date_max_data
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
         date_debut_hist = st.date_input(
             "Du (date)",
             value=default_debut,
@@ -235,13 +267,19 @@ if section == "Flux & historique":
     with col_f2:
         date_fin_hist = st.date_input(
             "Au (date)",
-            value=date_max_data,
+            value=default_fin,
             min_value=date_min_data,
             max_value=date_max_data,
             key="hist_fin",
         )
     with col_f3:
-        st.caption("Réduire la période pour des courbes plus lisibles.")
+        st.caption("Vue annuelle : pics hiver, baisse été. Personnalisée : choisir les dates à la main.")
+
+    if preset == "Année complète (dernière)" and full_year_start <= full_year_end:
+        st.info(
+            f"**Vue annuelle ({last_full_year})** — Les courbes ne suivent pas un pattern uniforme toute l'année : "
+            "pics en hiver (grippe, bronchiolite) et baisse relative en été. Comparer avec « Hiver » et « Été » pour voir l'écart."
+        )
 
     if date_debut_hist > date_fin_hist:
         st.warning("La date de début doit être antérieure à la date de fin. Affichage de la période complète.")
@@ -443,9 +481,31 @@ elif section == "Prévisions":
     last_date = occupation_df["date"].max()
     start_prevision = last_date + pd.Timedelta(days=1)
     start_prevision_date = start_prevision.date() if hasattr(start_prevision, "date") else pd.Timestamp(start_prevision).date()
+    # Horizon max 180 jours (6 mois) pour voir jusqu'à l'été (ex. données fin déc → prévisions jusqu'à fin juin / juillet)
+    HORIZON_MAX_JOURS = 180
     default_end = start_prevision + pd.Timedelta(days=14)
     default_end_date = default_end.date() if hasattr(default_end, "date") else pd.Timestamp(default_end).date()
-    max_end_date = (start_prevision + pd.Timedelta(days=90)).date() if hasattr((start_prevision + pd.Timedelta(days=90)), "date") else pd.Timestamp(start_prevision + pd.Timedelta(days=90)).date()
+    max_end_date = (start_prevision + pd.Timedelta(days=HORIZON_MAX_JOURS)).date() if hasattr((start_prevision + pd.Timedelta(days=HORIZON_MAX_JOURS)), "date") else pd.Timestamp(start_prevision + pd.Timedelta(days=HORIZON_MAX_JOURS)).date()
+
+    # Presets : 14 j, 1 mois, 3 mois, 6 mois (pour comparer jusqu'à l'été)
+    preset_horizons = {
+        "14 jours": 14,
+        "1 mois": 30,
+        "3 mois": 90,
+        "6 mois (jusqu'à l'été)": 180,
+    }
+    preset_choisi = st.radio(
+        "Portée des prévisions",
+        options=list(preset_horizons.keys()),
+        index=0,
+        key="pred_preset",
+        horizontal=True,
+        help="Choisir une portée pour remplir automatiquement la date de fin.",
+    )
+    preset_end_date = (start_prevision + pd.Timedelta(days=preset_horizons[preset_choisi])).date()
+    if isinstance(preset_end_date, pd.Timestamp):
+        preset_end_date = preset_end_date.date()
+    preset_end_date = min(preset_end_date, max_end_date)
 
     st.subheader("Période des prévisions")
     col_period1, col_period2, col_period3 = st.columns(3)
@@ -459,10 +519,11 @@ elif section == "Prévisions":
     with col_period2:
         date_fin_prevision = st.date_input(
             "Fin des prévisions (date)",
-            value=default_end_date,
+            value=preset_end_date,
             min_value=start_prevision_date,
             max_value=max_end_date,
             key="pred_fin",
+            help=f"Jusqu'à {HORIZON_MAX_JOURS} jours (6 mois). Choisir « 6 mois » pour voir jusqu'en été.",
         )
     with col_period3:
         # Nombre de jours = (fin - début) + 1 pour inclure le dernier jour
@@ -470,7 +531,7 @@ elif section == "Prévisions":
         if horizon < 1:
             horizon = 14
             date_fin_prevision = default_end_date
-        horizon = min(max(horizon, 1), 90)
+        horizon = min(max(horizon, 1), HORIZON_MAX_JOURS)
         st.metric("Nombre de jours prévus", horizon)
 
     st.caption(f"Prévisions du **{start_prevision_date.strftime('%d/%m/%Y')}** au **{date_fin_prevision.strftime('%d/%m/%Y')}** ({horizon} jours)")
@@ -515,8 +576,14 @@ elif section == "Prévisions":
     CAPACITE = 1800
 
     # Calcul des prévisions selon le modèle choisi (logique explicite pour que la courbe change bien)
+    best_model_name = None
+    best_model_metrics = None
     if modele_choisi == "auto":
         besoins = predict_besoins(occupation_df, horizon_jours=horizon, capacite_lits=CAPACITE)
+        # Afficher quel modèle a été sélectionné par le benchmark (meilleur % ±10 %, puis MAE)
+        adm_series_auto = prepare_series(occupation_df, "admissions_jour")
+        val_days = min(90, max(28, len(adm_series_auto) // 3))
+        best_model_name, best_model_metrics = select_best_model_by_backtest(adm_series_auto, validation_days=val_days)
     elif modele_choisi == "direct_hw":
         pred_df = predict_occupation_direct(occupation_df, horizon_jours=horizon, prefer="holt_winters")
         if not pred_df.empty:
@@ -560,7 +627,17 @@ elif section == "Prévisions":
             st.caption("Modèle demandé non disponible (série trop courte ou erreur) ; affichage Auto.")
 
     pred_df = besoins["previsions"]
-    st.caption(f"Modèle affiché : **{modele_choisi_label}**.")
+    if modele_choisi == "auto" and best_model_name:
+        st.caption(
+            f"Modèle affiché : **{modele_choisi_label}** — modèle utilisé pour les admissions : **{best_model_name}** "
+            f"(sélectionné par benchmark : meilleur % à ±10 % sur les {val_days} derniers jours)."
+        )
+        if best_model_metrics and best_model_metrics.get(best_model_name):
+            with st.expander("Voir les métriques du benchmark (tous les modèles)"):
+                for name, m in best_model_metrics.items():
+                    st.text(f"{name}: % ±10 % = {m.get('pct_within_10', 0):.1%}, MAE = {m.get('mae', 0):.1f}, RMSE = {m.get('rmse', 0):.1f}")
+    else:
+        st.caption(f"Modèle affiché : **{modele_choisi_label}**.")
 
     col1, col2 = st.columns(2)
     with col1:

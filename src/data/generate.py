@@ -38,7 +38,7 @@ def _ensure_dir(path: Path) -> None:
 
 def generate_admissions(
     start_date: str = "2022-01-01",
-    end_date: str = "2024-12-31",
+    end_date: str = "2024-12-31",  # Au moins 2 années complètes pour comparer hiver / été
     daily_base: int = 320,
     trend_per_year: float = 0.02,
     seed: int = 42,
@@ -139,6 +139,7 @@ def generate_all(
 ) -> tuple:
     """
     Génère les données fictives et les enregistre (optionnel).
+    Par défaut : 3 ans (2022–2024) pour une vue annuelle et la comparaison hiver / été.
     Retourne (admissions par date/service, occupation quotidienne).
     """
     admissions = generate_admissions(start_date=start_date, end_date=end_date)

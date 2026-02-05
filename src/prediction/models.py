@@ -469,20 +469,96 @@ def predict_sarima(
     })
 
 
+# --- Benchmark : sélection du meilleur modèle par backtest ---
+def select_best_model_by_backtest(
+    series: pd.Series,
+    validation_days: int = 90,
+    metric_primary: str = "pct_within_10",
+) -> Tuple[str, Dict[str, Dict[str, float]]]:
+    """
+    Backteste les 4 modèles (Holt-Winters, Ridge, Boosting, SARIMA) sur les validation_days
+    derniers jours. Retourne le nom du meilleur modèle et les métriques par modèle.
+    Critère principal : metric_primary ("pct_within_10" = plus haut mieux, "mae"/"rmse" = plus bas mieux).
+    En cas d'égalité sur pct_within_10, on départage par MAE (plus bas mieux).
+    """
+    series = _ensure_daily_index(series)
+    min_len = validation_days + 60
+    if len(series) < min_len:
+        return "holt_winters", {}  # fallback, pas assez de données pour benchmark
+
+    train_end = len(series) - validation_days
+    train = series.iloc[:train_end]
+    test = series.iloc[train_end:]
+    horizon = len(test)
+    actual = test.values
+
+    models_to_test = [
+        ("holt_winters", predict_holt_winters),
+        ("regression", predict_regression),
+        ("boosting", predict_boosting),
+        ("sarima", predict_sarima),
+    ]
+    results: Dict[str, Dict[str, float]] = {}
+
+    for name, fn in models_to_test:
+        try:
+            pred_df = fn(train, horizon_jours=horizon)
+        except Exception:
+            continue
+        if pred_df is None or pred_df.empty or len(pred_df) < horizon:
+            continue
+        pred = pred_df["prediction"].values[:horizon]
+        mae = float(np.mean(np.abs(pred - actual)))
+        rmse = float(np.sqrt(np.mean((pred - actual) ** 2)))
+        rel_err = np.where(actual > 0, np.abs(pred - actual) / np.maximum(actual, 1e-6), 0)
+        pct_within_10 = float((rel_err <= 0.10).mean())
+        results[name] = {"mae": mae, "rmse": rmse, "pct_within_10": pct_within_10}
+
+    if not results:
+        return "holt_winters", {}
+
+    # Meilleur : d'abord par pct_within_10 (desc), puis par MAE (asc)
+    def score(name: str) -> Tuple[float, float]:
+        r = results[name]
+        return (-r["pct_within_10"], r["mae"])
+
+    best_name = min(results.keys(), key=score)
+    return best_name, results
+
+
 # --- Choix du meilleur modèle (admissions) ---
 def predict_admissions_best(
     series: pd.Series,
     horizon_jours: int = 14,
-    prefer: str = "holt_winters",
+    prefer: str = "best_by_backtest",
 ) -> pd.DataFrame:
     """
-    Prévision des admissions : essaie Holt-Winters, régression, Boosting (ML), SARIMA, puis moyenne glissante.
-    Le Boosting apprend du jeu actuel (lags, calendrier, saison_grippe, mois_hiver) pour affiner les prévisions.
-    prefer : "holt_winters" | "regression" | "boosting" | "sarima" | "ma"
+    Prévision des admissions.
+    - prefer="best_by_backtest" : benchmark des 4 modèles (backtest % ±10 %, MAE), utilise le meilleur.
+    - Sinon : cascade (premier qui réussit) — "holt_winters" | "regression" | "boosting" | "sarima" | "ma"
     """
     series = _ensure_daily_index(series)
     if series.empty or len(series) < 7:
         return predict_moving_average(series, horizon_jours=horizon_jours)
+
+    # Sélection par benchmark : on choisit le modèle le plus "true to real" (meilleur % ±10 %, puis MAE)
+    if prefer == "best_by_backtest":
+        validation_days = min(90, max(28, (len(series) // 3)))
+        best_name, _ = select_best_model_by_backtest(series, validation_days=validation_days)
+        model_map = {
+            "holt_winters": predict_holt_winters,
+            "regression": predict_regression,
+            "boosting": predict_boosting,
+            "sarima": predict_sarima,
+        }
+        if best_name in model_map:
+            try:
+                result = model_map[best_name](series, horizon_jours=horizon_jours)
+                if result is not None and not (hasattr(result, "empty") and result.empty) and len(result) >= horizon_jours:
+                    return result.head(horizon_jours) if hasattr(result, "head") else result
+            except Exception:
+                pass
+        # Si le meilleur échoue à l'inférence (ex. série trop courte pour SARIMA), on enchaîne la cascade
 
     order = [
         ("holt_winters", predict_holt_winters),
